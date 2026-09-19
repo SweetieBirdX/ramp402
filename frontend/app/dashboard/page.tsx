@@ -1,11 +1,113 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
-import { getBalance, listEndpoints, ApiError } from "@/lib/api";
+import {
+  bootstrapSeller,
+  getBalance,
+  listEndpoints,
+  listCalls,
+  getGatewayUrl,
+  ApiError,
+} from "@/lib/api";
 import { stroopsToDisplay } from "@/lib/format";
-import type { EndpointSummary, GetBalanceResponse } from "@/lib/types";
+import type { EndpointSummary, GetBalanceResponse, CallSummary } from "@/lib/types";
+
+// -------------------------------------------------------------------------------------------------
+// Inline SVG Icons (zero external dependencies)
+// -------------------------------------------------------------------------------------------------
+
+function ClipboardCopyIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      xmlns="http://www.w3.org/2000/svg"
+      fill="none"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      stroke="currentColor"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+      />
+    </svg>
+  );
+}
+
+function CheckIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      xmlns="http://www.w3.org/2000/svg"
+      fill="none"
+      viewBox="0 0 24 24"
+      strokeWidth={2.5}
+      stroke="currentColor"
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      xmlns="http://www.w3.org/2000/svg"
+      fill="none"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      stroke="currentColor"
+    >
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+    </svg>
+  );
+}
+
+function ExternalLinkIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      xmlns="http://www.w3.org/2000/svg"
+      fill="none"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      stroke="currentColor"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
+      />
+    </svg>
+  );
+}
+
+function RefreshIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      xmlns="http://www.w3.org/2000/svg"
+      fill="none"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      stroke="currentColor"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+      />
+    </svg>
+  );
+}
+
+// -------------------------------------------------------------------------------------------------
+// Dashboard Page Component
+// -------------------------------------------------------------------------------------------------
 
 export default function DashboardPage() {
   const {
@@ -14,19 +116,34 @@ export default function DashboardPage() {
     stellarAddress,
     email,
     isCreatingWallet,
-    isBootstrapping,
-    isBootstrapped,
-    bootstrapError,
-    bootstrap,
   } = useAuth();
   const router = useRouter();
 
+  // Core dashboard state
   const [balance, setBalance] = useState<GetBalanceResponse | null>(null);
   const [balanceError, setBalanceError] = useState<ApiError | Error | null>(null);
   const [endpoints, setEndpoints] = useState<EndpointSummary[] | null>(null);
   const [endpointsError, setEndpointsError] = useState<ApiError | Error | null>(null);
   const [isLoadingData, setIsLoadingData] = useState(false);
 
+  // Setup / bootstrap state (requirement 1)
+  const [isSettingUpAccount, setIsSettingUpAccount] = useState(false);
+  const [bootstrapSuccess, setBootstrapSuccess] = useState(false);
+  const [setupError, setSetupError] = useState<ApiError | Error | null>(null);
+  const hasBootstrappedRef = useRef(false);
+
+  // Per-endpoint call log accordion state (requirement 4)
+  const [expandedEndpoints, setExpandedEndpoints] = useState<Record<string, boolean>>({});
+  const [callsByEndpoint, setCallsByEndpoint] = useState<Record<string, CallSummary[]>>({});
+  const [loadingCalls, setLoadingCalls] = useState<Record<string, boolean>>({});
+  const [callsError, setCallsError] = useState<Record<string, string>>({});
+
+  // Obvious copy button state (requirement 3)
+  const [copiedEndpointId, setCopiedEndpointId] = useState<string | null>(null);
+
+  const gatewayUrl = getGatewayUrl();
+
+  // Fetch balance and endpoints
   const fetchDashboardData = useCallback(async () => {
     if (!authenticated) return;
     setIsLoadingData(true);
@@ -53,52 +170,116 @@ export default function DashboardPage() {
     setIsLoadingData(false);
   }, [authenticated]);
 
+  // Requirement 1: On mount after login, call bootstrapSeller() exactly once
+  const executeBootstrap = useCallback(async () => {
+    setIsSettingUpAccount(true);
+    setSetupError(null);
+
+    let attempts = 0;
+    while (attempts < 3) {
+      attempts++;
+      try {
+        await bootstrapSeller();
+        setBootstrapSuccess(true);
+        setIsSettingUpAccount(false);
+        await fetchDashboardData();
+        return;
+      } catch (err: unknown) {
+        // If 409 (embedded wallet not yet indexed by Privy server), wait and retry
+        const is409 =
+          (err instanceof ApiError && err.status === 409) ||
+          (typeof err === "object" && err !== null && "status" in err && (err as { status: unknown }).status === 409);
+
+        if (is409 && attempts < 3) {
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+
+        const errorObj = err instanceof Error ? err : new Error(String(err));
+        setSetupError(errorObj);
+        setIsSettingUpAccount(false);
+        return;
+      }
+    }
+  }, [fetchDashboardData]);
+
+  // Auth gate & bootstrap trigger on mount
   useEffect(() => {
     if (ready && !authenticated) {
       router.replace("/");
       return;
     }
 
-    if (ready && authenticated && stellarAddress && !isBootstrapping) {
-      let isSubscribed = true;
-
-      const runInitialFetch = async () => {
-        await Promise.resolve();
-        if (!isSubscribed) return;
-
-        setIsLoadingData(true);
-        setBalanceError(null);
-        setEndpointsError(null);
-
-        const [balanceRes, endpointsRes] = await Promise.allSettled([
-          getBalance(),
-          listEndpoints(),
-        ]);
-
-        if (!isSubscribed) return;
-
-        if (balanceRes.status === "fulfilled") {
-          setBalance(balanceRes.value);
-        } else {
-          setBalanceError(balanceRes.reason);
-        }
-
-        if (endpointsRes.status === "fulfilled") {
-          setEndpoints(endpointsRes.value.endpoints);
-        } else {
-          setEndpointsError(endpointsRes.reason);
-        }
-
-        setIsLoadingData(false);
-      };
-
-      runInitialFetch();
-
-      return () => {
-        isSubscribed = false;
-      };
+    if (ready && authenticated && stellarAddress && !hasBootstrappedRef.current) {
+      hasBootstrappedRef.current = true;
+      executeBootstrap();
     }
-  }, [ready, authenticated, stellarAddress, isBootstrapping, isBootstrapped, router]);
+  }, [ready, authenticated, stellarAddress, executeBootstrap, router]);
+
+  // Handle copy proxy URL to clipboard
+  const handleCopyProxyUrl = async (endpointId: string, proxyUrl: string) => {
+    try {
+      await navigator.clipboard.writeText(proxyUrl);
+      setCopiedEndpointId(endpointId);
+      setTimeout(() => {
+        setCopiedEndpointId((curr) => (curr === endpointId ? null : curr));
+      }, 2000);
+    } catch (err) {
+      console.error("Failed to copy proxy URL:", err);
+    }
+  };
+
+  // Requirement 4: Toggle per-endpoint expandable call log
+  const toggleCallLog = useCallback(async (endpointId: string) => {
+    setExpandedEndpoints((prev) => {
+      const isExpanding = !prev[endpointId];
+      if (isExpanding && !callsByEndpoint[endpointId]) {
+        setLoadingCalls((l) => ({ ...l, [endpointId]: true }));
+        setCallsError((e) => {
+          const next = { ...e };
+          delete next[endpointId];
+          return next;
+        });
+
+        listCalls(endpointId)
+          .then((res) => {
+            setCallsByEndpoint((c) => ({
+              ...c,
+              [endpointId]: res.calls,
+            }));
+          })
+          .catch((err: unknown) => {
+            const message =
+              err instanceof ApiError
+                ? `${err.status} ${err.code}: ${err.message}`
+                : err instanceof Error
+                ? err.message
+                : "Failed to load calls";
+            setCallsError((e) => ({
+              ...e,
+              [endpointId]: message,
+            }));
+          })
+          .finally(() => {
+            setLoadingCalls((l) => ({ ...l, [endpointId]: false }));
+          });
+      }
+      return { ...prev, [endpointId]: isExpanding };
+    });
+  }, [callsByEndpoint]);
+
+  // Auto-expand the first endpoint call log when endpoints are loaded
+  const hasAutoExpandedRef = useRef(false);
+  useEffect(() => {
+    if (endpoints && endpoints.length > 0 && !hasAutoExpandedRef.current) {
+      hasAutoExpandedRef.current = true;
+      toggleCallLog(endpoints[0].endpoint_id);
+    }
+  }, [endpoints, toggleCallLog]);
+
+  // -----------------------------------------------------------------------------------------------
+  // Loading & Onboarding Views
+  // -----------------------------------------------------------------------------------------------
 
   // Loading view while checking auth
   if (!ready || !authenticated) {
@@ -106,41 +287,41 @@ export default function DashboardPage() {
       <div className="space-y-6">
         <div className="h-8 w-64 bg-neutral-200 animate-pulse rounded-md" />
         <div className="p-12 text-center border border-neutral-200 bg-white rounded-lg">
-          <div className="inline-block h-6 w-6 border-2 border-neutral-300 border-t-neutral-900 rounded-full animate-spin mb-3" />
-          <p className="text-sm text-neutral-600">Verifying authentication status...</p>
+          <div className="inline-block h-7 w-7 border-2 border-neutral-300 border-t-neutral-900 rounded-full animate-spin mb-3" />
+          <p className="text-sm font-medium text-neutral-600">Verifying authentication status...</p>
         </div>
       </div>
     );
   }
 
-  // Loading view while provisioning wallet
-  if (isCreatingWallet || (!stellarAddress && !bootstrapError)) {
+  // Loading view while provisioning embedded Stellar wallet
+  if (isCreatingWallet || (!stellarAddress && !setupError)) {
     return (
       <div className="space-y-6">
         <div className="h-8 w-64 bg-neutral-200 animate-pulse rounded-md" />
         <div className="p-12 text-center border border-neutral-200 bg-white rounded-lg space-y-3">
-          <div className="inline-block h-7 w-7 border-2 border-neutral-300 border-t-neutral-900 rounded-full animate-spin" />
+          <div className="inline-block h-8 w-8 border-2 border-neutral-300 border-t-neutral-900 rounded-full animate-spin" />
           <h3 className="text-base font-semibold text-neutral-900">Provisioning Embedded Stellar Wallet</h3>
           <p className="text-sm text-neutral-500 max-w-md mx-auto">
-            Creating non-custodial Ed25519 keypair for your account. Please wait a moment...
+            Creating a non-custodial Ed25519 keypair for your account. Please wait a moment...
           </p>
         </div>
       </div>
     );
   }
 
-  // Loading view during the 6-second Friendbot bootstrap
-  if (isBootstrapping) {
+  // Requirement 1: Show brief "setting up your account" state while bootstrap runs
+  if (isSettingUpAccount) {
     return (
       <div className="space-y-6">
         <div className="h-8 w-64 bg-neutral-200 animate-pulse rounded-md" />
-        <div className="p-12 text-center border border-neutral-200 bg-white rounded-lg space-y-3">
-          <div className="inline-block h-7 w-7 border-2 border-neutral-300 border-t-neutral-900 rounded-full animate-spin" />
-          <h3 className="text-base font-semibold text-neutral-900">Bootstrapping Seller Account</h3>
+        <div className="p-12 text-center border border-neutral-200 bg-white rounded-lg space-y-4">
+          <div className="inline-block h-9 w-9 border-3 border-neutral-300 border-t-neutral-900 rounded-full animate-spin" />
+          <h3 className="text-lg font-bold text-neutral-900">Setting Up Your Account</h3>
           <p className="text-sm text-neutral-600 max-w-md mx-auto">
             Registering your Stellar address on the gateway and funding it via Friendbot on testnet.
           </p>
-          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-50 border border-amber-200 text-xs font-medium text-amber-800">
+          <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-50 border border-amber-200 text-xs font-medium text-amber-800">
             <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
             First login initialization takes ~6 seconds...
           </div>
@@ -149,11 +330,15 @@ export default function DashboardPage() {
     );
   }
 
-  const renderError = (err: ApiError | Error) => {
+  // -----------------------------------------------------------------------------------------------
+  // Error Renderer (Requirement 5: 403, 501, network)
+  // -----------------------------------------------------------------------------------------------
+
+  const renderError = (err: ApiError | Error, retryAction?: () => void) => {
     if (err instanceof ApiError) {
       if (err.status === 403) {
         return (
-          <div className="rounded-lg bg-amber-50 border border-amber-300 p-4 text-xs text-amber-900 space-y-2">
+          <div className="rounded-lg bg-amber-50 border border-amber-300 p-4 text-xs text-amber-900 space-y-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div className="flex items-center gap-2 font-semibold">
                 <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-bold bg-amber-200 text-amber-900">
@@ -163,46 +348,80 @@ export default function DashboardPage() {
               </div>
               <button
                 type="button"
-                onClick={async () => {
-                  const ok = await bootstrap();
-                  if (ok) fetchDashboardData();
-                }}
-                disabled={isBootstrapping}
-                className="px-3 py-1 bg-amber-800 hover:bg-amber-900 text-white rounded font-medium text-xs shadow-xs transition-colors cursor-pointer disabled:opacity-50 self-start sm:self-auto"
+                onClick={executeBootstrap}
+                disabled={isSettingUpAccount}
+                className="px-3 py-1.5 bg-amber-800 hover:bg-amber-900 text-white rounded font-medium text-xs shadow-xs transition-colors cursor-pointer disabled:opacity-50 self-start sm:self-auto"
               >
-                {isBootstrapping ? "Bootstrapping (~6s)..." : "Bootstrap Account"}
+                {isSettingUpAccount ? "Bootstrapping..." : "Bootstrap Account Now"}
               </button>
             </div>
             <p className="text-amber-800">
-              Gateway message: <code className="font-mono bg-amber-100/70 px-1 py-0.5 rounded text-amber-950">{err.message}</code>
+              Gateway message:{" "}
+              <code className="font-mono bg-amber-100 px-1 py-0.5 rounded text-amber-950">
+                {err.message}
+              </code>
             </p>
             <p className="text-neutral-600 text-[11px]">
-              The read routes require an initialized seller record in the database. Click &quot;Bootstrap Account&quot; to register your address and fund it via Friendbot.
+              The read routes require an initialized seller record in the database. Click &quot;Bootstrap Account Now&quot; to register your address and fund it via Friendbot.
             </p>
           </div>
         );
       }
 
-      return (
-        <div className="rounded-md bg-amber-50 border border-amber-200 p-4 text-xs text-amber-900">
-          <div className="flex items-center gap-2 font-semibold">
-            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-medium bg-amber-200 text-amber-800">
-              {err.status} {err.code}
-            </span>
-            <span className="font-mono">{err.message}</span>
+      if (err.status === 501) {
+        return (
+          <div className="rounded-lg bg-neutral-100 border border-neutral-300 p-4 text-xs text-neutral-800 space-y-1">
+            <div className="flex items-center gap-2 font-semibold">
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-bold bg-neutral-200 text-neutral-800">
+                501 Not Implemented
+              </span>
+              <span>Feature Stubbed in Gateway</span>
+            </div>
+            <p className="text-neutral-600">{err.message}</p>
           </div>
-          <p className="mt-1 text-amber-700">
-            {err.status === 501
-              ? "Gateway returned 501 Not Implemented (endpoint stubbed in gateway)."
-              : "An API error was returned by the gateway."}
-          </p>
+        );
+      }
+
+      return (
+        <div className="rounded-lg bg-red-50 border border-red-200 p-4 text-xs text-red-900 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 font-semibold">
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-bold bg-red-200 text-red-900">
+                {err.status} {err.code}
+              </span>
+              <span className="font-mono">{err.message}</span>
+            </div>
+            {retryAction ? (
+              <button
+                type="button"
+                onClick={retryAction}
+                className="px-2.5 py-1 bg-red-800 hover:bg-red-900 text-white rounded text-xs font-medium cursor-pointer"
+              >
+                Retry
+              </button>
+            ) : null}
+          </div>
         </div>
       );
     }
+
     return (
-      <div className="rounded-md bg-red-50 border border-red-200 p-4 text-xs text-red-900">
-        <p className="font-semibold">Network / Client Error</p>
-        <p className="mt-1 text-red-700">{err.message}</p>
+      <div className="rounded-lg bg-red-50 border border-red-200 p-4 text-xs text-red-900 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <p className="font-semibold">Client / Network Error</p>
+            <p className="mt-0.5 text-red-700">{err.message}</p>
+          </div>
+          {retryAction ? (
+            <button
+              type="button"
+              onClick={retryAction}
+              className="px-2.5 py-1 bg-red-800 hover:bg-red-900 text-white rounded text-xs font-medium cursor-pointer"
+            >
+              Retry
+            </button>
+          ) : null}
+        </div>
       </div>
     );
   };
@@ -211,23 +430,28 @@ export default function DashboardPage() {
     ? endpoints.reduce((sum, ep) => sum + (ep.call_count || 0), 0)
     : 0;
 
+  // -----------------------------------------------------------------------------------------------
+  // Main Dashboard View
+  // -----------------------------------------------------------------------------------------------
+
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+    <div className="space-y-6 max-w-6xl mx-auto pb-12">
+      {/* Header Banner */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-neutral-200 pb-5">
         <div>
           <h1 className="text-2xl font-bold text-neutral-900 tracking-tight">Seller Dashboard</h1>
           <p className="mt-1 text-sm text-neutral-600">
-            Manage your monetized endpoints, view on-chain balance, and withdraw to TRY.
+            Manage your monetized endpoints, view on-chain balance, and monitor paid agent calls.
           </p>
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-neutral-500">
+          <div className="mt-2.5 flex flex-wrap items-center gap-2 text-xs text-neutral-500">
             <span>Account:</span>
-            <span className="font-semibold text-neutral-700">{email}</span>
+            <span className="font-semibold text-neutral-800">{email}</span>
             <span className="text-neutral-300">|</span>
             <span>Stellar Address:</span>
-            <code className="font-mono bg-white px-2 py-0.5 border border-neutral-200 rounded text-neutral-800">
+            <code className="font-mono bg-neutral-100 px-2 py-0.5 border border-neutral-200 rounded text-neutral-800 select-all">
               {stellarAddress || "Pending creation..."}
             </code>
-            {isBootstrapped ? (
+            {bootstrapSuccess ? (
               <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-emerald-100 text-emerald-800">
                 ✓ Bootstrapped &amp; Funded
               </span>
@@ -235,40 +459,52 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2.5 self-start sm:self-auto">
           <button
             type="button"
             onClick={() => fetchDashboardData()}
-            disabled={isLoadingData || isBootstrapping}
-            className="inline-flex items-center px-3 py-2 border border-neutral-300 text-xs font-medium rounded-md text-neutral-700 bg-white hover:bg-neutral-50 disabled:opacity-50 transition-colors"
+            disabled={isLoadingData || isSettingUpAccount}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-neutral-300 text-xs font-semibold rounded-md text-neutral-700 bg-white hover:bg-neutral-50 disabled:opacity-50 transition-colors shadow-xs cursor-pointer"
           >
-            {isLoadingData ? "Fetching..." : "Refresh Data"}
+            <RefreshIcon className={`h-3.5 w-3.5 ${isLoadingData ? "animate-spin" : ""}`} />
+            <span>{isLoadingData ? "Refreshing..." : "Refresh"}</span>
           </button>
           <button
             type="button"
             disabled
-            className="inline-flex items-center px-4 py-2 border border-neutral-300 text-sm font-medium rounded-md text-neutral-400 bg-neutral-100 cursor-not-allowed"
+            className="inline-flex items-center px-4 py-2 border border-neutral-200 text-xs font-semibold rounded-md text-neutral-400 bg-neutral-100 cursor-not-allowed shadow-xs"
+            title="Registration pipeline arrives in next step"
           >
             + Register Endpoint
           </button>
         </div>
       </div>
 
-      {/* Metrics Row */}
+      {/* Setup Error if initial bootstrap failed */}
+      {setupError ? (
+        <div className="mb-4">{renderError(setupError, executeBootstrap)}</div>
+      ) : null}
+
+      {/* Metrics Row: Balance, Endpoints Count, Calls Count */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-        {/* Balance Card */}
-        <div className="border border-neutral-200 bg-white rounded-lg p-5 flex flex-col justify-between">
+        {/* Requirement 2: Balance Card with stroopsToDisplay() */}
+        <div className="border border-neutral-200 bg-white rounded-lg p-5 flex flex-col justify-between shadow-xs">
           <div>
-            <p className="text-xs font-medium text-neutral-500 uppercase tracking-wider">
-              On-Chain Balance
-            </p>
-            {isLoadingData ? (
-              <div className="mt-2 h-9 w-32 bg-neutral-100 animate-pulse rounded" />
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">
+                On-Chain Balance
+              </p>
+              <span className="text-[11px] px-2 py-0.5 rounded bg-neutral-100 text-neutral-600 font-mono">
+                ramp_ledger
+              </span>
+            </div>
+            {isLoadingData && !balance ? (
+              <div className="mt-3 h-9 w-32 bg-neutral-100 animate-pulse rounded" />
             ) : balanceError ? (
-              <div className="mt-3">{renderError(balanceError)}</div>
+              <div className="mt-3">{renderError(balanceError, fetchDashboardData)}</div>
             ) : balance ? (
               <div className="mt-2">
-                <p className="text-3xl font-bold text-neutral-900">
+                <p className="text-3xl font-extrabold text-neutral-900 tracking-tight">
                   {stroopsToDisplay(balance.balance_stroops)} USDC
                 </p>
                 <p className="mt-1 text-xs text-neutral-500 font-mono">
@@ -276,102 +512,342 @@ export default function DashboardPage() {
                 </p>
               </div>
             ) : (
-              <p className="mt-2 text-3xl font-bold text-neutral-900">0.00 USDC</p>
+              <p className="mt-2 text-3xl font-extrabold text-neutral-900">0.00 USDC</p>
             )}
           </div>
           <button
             type="button"
             disabled
-            className="mt-4 w-full py-2 px-3 border border-neutral-300 rounded text-xs font-medium text-neutral-400 bg-neutral-50 cursor-not-allowed"
+            className="mt-5 w-full py-2 px-3 border border-neutral-200 rounded text-xs font-medium text-neutral-400 bg-neutral-50 cursor-not-allowed text-center"
+            title="Off-ramp to TRY pipeline"
           >
             Withdraw to TRY (Off-Ramp)
           </button>
         </div>
 
         {/* Endpoints Count */}
-        <div className="border border-neutral-200 bg-white rounded-lg p-5">
-          <p className="text-xs font-medium text-neutral-500 uppercase tracking-wider">
-            Active Endpoints
-          </p>
-          {isLoadingData ? (
-            <div className="mt-2 h-9 w-16 bg-neutral-100 animate-pulse rounded" />
-          ) : endpointsError ? (
-            <p className="mt-2 text-3xl font-bold text-neutral-400">—</p>
-          ) : (
-            <p className="mt-2 text-3xl font-bold text-neutral-900">
-              {endpoints ? endpoints.length : 0}
+        <div className="border border-neutral-200 bg-white rounded-lg p-5 shadow-xs">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">
+              Active Endpoints
             </p>
+            <span className="text-[11px] px-2 py-0.5 rounded bg-neutral-100 text-neutral-600 font-mono">
+              registered
+            </span>
+          </div>
+          {isLoadingData && !endpoints ? (
+            <div className="mt-3 h-9 w-16 bg-neutral-100 animate-pulse rounded" />
+          ) : endpointsError ? (
+            <p className="mt-3 text-3xl font-bold text-neutral-400">—</p>
+          ) : (
+            <div className="mt-2">
+              <p className="text-3xl font-extrabold text-neutral-900 tracking-tight">
+                {endpoints ? endpoints.length : 0}
+              </p>
+              <p className="mt-1 text-xs text-neutral-500 font-mono">Protected proxy routes</p>
+            </div>
           )}
-          <p className="mt-1 text-xs text-neutral-500 font-mono">Registered on-chain</p>
         </div>
 
         {/* Calls Count */}
-        <div className="border border-neutral-200 bg-white rounded-lg p-5">
-          <p className="text-xs font-medium text-neutral-500 uppercase tracking-wider">
-            Total Calls Served
-          </p>
-          {isLoadingData ? (
-            <div className="mt-2 h-9 w-16 bg-neutral-100 animate-pulse rounded" />
-          ) : endpointsError ? (
-            <p className="mt-2 text-3xl font-bold text-neutral-400">—</p>
-          ) : (
-            <p className="mt-2 text-3xl font-bold text-neutral-900">
-              {totalCalls.toLocaleString()}
+        <div className="border border-neutral-200 bg-white rounded-lg p-5 shadow-xs">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">
+              Total Calls Served
             </p>
+            <span className="text-[11px] px-2 py-0.5 rounded bg-neutral-100 text-neutral-600 font-mono">
+              x402
+            </span>
+          </div>
+          {isLoadingData && !endpoints ? (
+            <div className="mt-3 h-9 w-16 bg-neutral-100 animate-pulse rounded" />
+          ) : endpointsError ? (
+            <p className="mt-3 text-3xl font-bold text-neutral-400">—</p>
+          ) : (
+            <div className="mt-2">
+              <p className="text-3xl font-extrabold text-neutral-900 tracking-tight">
+                {totalCalls.toLocaleString()}
+              </p>
+              <p className="mt-1 text-xs text-neutral-500 font-mono">Total agent invocations</p>
+            </div>
           )}
-          <p className="mt-1 text-xs text-neutral-500 font-mono">Paid via x402</p>
         </div>
       </div>
 
-      {/* Endpoints Section */}
-      <div className="border border-neutral-200 bg-white rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-neutral-900">Endpoints</h2>
-        {isLoadingData ? (
-          <div className="mt-4 p-8 text-center">
-            <div className="inline-block h-5 w-5 border-2 border-neutral-300 border-t-neutral-900 rounded-full animate-spin" />
-            <p className="mt-2 text-xs text-neutral-500">Loading endpoints...</p>
+      {/* Endpoints & Expandable Call Logs (Requirements 3, 4, 5) */}
+      <div className="border border-neutral-200 bg-white rounded-lg shadow-xs overflow-hidden">
+        <div className="p-5 border-b border-neutral-200 flex items-center justify-between bg-neutral-50/50">
+          <div>
+            <h2 className="text-base font-bold text-neutral-900">Monetized Endpoints</h2>
+            <p className="text-xs text-neutral-500 mt-0.5">
+              Each endpoint protects an upstream API behind x402 payment requirements.
+            </p>
+          </div>
+          {endpoints && endpoints.length > 0 ? (
+            <span className="text-xs font-mono font-medium px-2.5 py-1 bg-neutral-200/80 rounded-full text-neutral-700">
+              {endpoints.length} {endpoints.length === 1 ? "endpoint" : "endpoints"}
+            </span>
+          ) : null}
+        </div>
+
+        {/* Loading state for endpoints */}
+        {isLoadingData && !endpoints ? (
+          <div className="p-12 text-center space-y-3">
+            <div className="inline-block h-6 w-6 border-2 border-neutral-300 border-t-neutral-900 rounded-full animate-spin" />
+            <p className="text-sm text-neutral-500">Loading registered endpoints...</p>
           </div>
         ) : endpointsError ? (
-          <div className="mt-4">{renderError(endpointsError)}</div>
+          /* Error state for endpoints */
+          <div className="p-6">{renderError(endpointsError, fetchDashboardData)}</div>
         ) : endpoints && endpoints.length > 0 ? (
-          <div className="mt-4 divide-y divide-neutral-200">
-            {endpoints.map((ep) => (
-              <div key={ep.endpoint_id} className="py-3 flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-semibold text-neutral-900">{ep.upstream_url}</p>
-                  <div className="flex items-center gap-2 mt-0.5">
-                    <p className="text-xs text-neutral-500 font-mono">Slug: {ep.proxy_slug}</p>
-                    <span className="text-neutral-300">&bull;</span>
-                    <span className="text-xs px-2 py-0.5 bg-neutral-100 rounded-full font-mono text-neutral-700">
-                      {ep.call_count ?? 0} {ep.call_count === 1 ? "call" : "calls"}
-                    </span>
+          /* Requirement 3: Endpoint list */
+          <div className="divide-y divide-neutral-200">
+            {endpoints.map((ep) => {
+              const proxyUrl = `${gatewayUrl}/proxy/${ep.proxy_slug}`;
+              const isExpanded = !!expandedEndpoints[ep.endpoint_id];
+              const calls = callsByEndpoint[ep.endpoint_id];
+              const isCallsLoading = !!loadingCalls[ep.endpoint_id];
+              const epCallsError = callsError[ep.endpoint_id];
+              const isCopied = copiedEndpointId === ep.endpoint_id;
+
+              return (
+                <div key={ep.endpoint_id} className="p-5 hover:bg-neutral-50/40 transition-colors">
+                  {/* Endpoint Main Row */}
+                  <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
+                    <div className="space-y-2 flex-1 min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="px-2 py-0.5 bg-neutral-100 border border-neutral-300 rounded text-[11px] font-mono font-bold text-neutral-700">
+                          ID #{ep.endpoint_id}
+                        </span>
+                        <p className="text-sm font-bold text-neutral-900 truncate">
+                          {ep.upstream_url}
+                        </p>
+                      </div>
+
+                      {/* Requirement 3: Obvious Copy Button for Proxy URL */}
+                      <div className="bg-neutral-100/70 border border-neutral-200 rounded-md p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-500 block">
+                            Agent Proxy URL
+                          </span>
+                          <code className="font-mono text-xs text-neutral-900 break-all select-all font-semibold">
+                            {proxyUrl}
+                          </code>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleCopyProxyUrl(ep.endpoint_id, proxyUrl)}
+                          className={`inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded text-xs font-semibold transition-all shadow-xs shrink-0 cursor-pointer ${
+                            isCopied
+                              ? "bg-emerald-600 text-white hover:bg-emerald-700 ring-2 ring-emerald-300"
+                              : "bg-neutral-900 text-white hover:bg-neutral-800"
+                          }`}
+                          title="Copy proxy URL to give to agents"
+                        >
+                          {isCopied ? (
+                            <>
+                              <CheckIcon className="h-3.5 w-3.5" />
+                              <span>Copied!</span>
+                            </>
+                          ) : (
+                            <>
+                              <ClipboardCopyIcon className="h-3.5 w-3.5" />
+                              <span>Copy Proxy URL</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+
+                      {/* Metadata Row */}
+                      <div className="flex flex-wrap items-center gap-3 text-xs text-neutral-500">
+                        <span>
+                          Created:{" "}
+                          <strong className="text-neutral-700">
+                            {new Date(ep.created_at).toLocaleDateString(undefined, {
+                              year: "numeric",
+                              month: "short",
+                              day: "numeric",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </strong>
+                        </span>
+                        <span className="text-neutral-300">&bull;</span>
+                        <span>
+                          Slug: <code className="font-mono text-neutral-700">{ep.proxy_slug}</code>
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Price and Calls Count */}
+                    <div className="flex lg:flex-col items-center lg:items-end justify-between gap-2 shrink-0 pt-2 lg:pt-0">
+                      <div className="text-left lg:text-right">
+                        <p className="text-base font-extrabold text-neutral-900">
+                          {stroopsToDisplay(ep.price_stroops)} USDC
+                        </p>
+                        <p className="text-xs text-neutral-400 font-mono">
+                          {ep.price_stroops.toLocaleString()} stroops / call
+                        </p>
+                      </div>
+
+                      {/* Requirement 4: Accordion expand button */}
+                      <button
+                        type="button"
+                        onClick={() => toggleCallLog(ep.endpoint_id)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-neutral-300 bg-white hover:bg-neutral-50 text-xs font-semibold text-neutral-700 shadow-xs transition-colors cursor-pointer"
+                      >
+                        <span>
+                          {isExpanded
+                            ? "Hide Calls"
+                            : `View Calls (${ep.call_count ?? 0})`}
+                        </span>
+                        <ChevronDownIcon
+                          className={`h-3.5 w-3.5 text-neutral-500 transition-transform duration-200 ${
+                            isExpanded ? "rotate-180" : ""
+                          }`}
+                        />
+                      </button>
+                    </div>
                   </div>
+
+                  {/* Requirement 4: Expandable Call Log Panel */}
+                  {isExpanded ? (
+                    <div className="mt-4 pt-4 border-t border-neutral-200 bg-neutral-50/60 rounded-md p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-600">
+                          Call History Log &middot; Endpoint #{ep.endpoint_id}
+                        </h3>
+                        <span className="text-[11px] text-neutral-500">
+                          Newest first (x402 settled)
+                        </span>
+                      </div>
+
+                      {isCallsLoading ? (
+                        <div className="py-6 text-center text-xs text-neutral-500">
+                          <div className="inline-block h-4 w-4 border-2 border-neutral-300 border-t-neutral-900 rounded-full animate-spin mr-2 align-middle" />
+                          Fetching call log from gateway...
+                        </div>
+                      ) : epCallsError ? (
+                        <div className="p-3 bg-red-50 border border-red-200 text-xs text-red-800 rounded">
+                          Failed to load calls: {epCallsError}
+                        </div>
+                      ) : calls && calls.length > 0 ? (
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full text-left text-xs">
+                            <thead>
+                              <tr className="border-b border-neutral-200 text-neutral-500">
+                                <th className="py-2 pr-3 font-semibold">Status</th>
+                                <th className="py-2 px-3 font-semibold">Amount</th>
+                                <th className="py-2 px-3 font-semibold">Agent Address</th>
+                                <th className="py-2 px-3 font-semibold">Timestamp</th>
+                                <th className="py-2 pl-3 font-semibold text-right">Transaction</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-neutral-200/60 font-mono">
+                              {calls.map((call) => {
+                                const statusPill =
+                                  call.status === "paid" ? (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                                      paid
+                                    </span>
+                                  ) : call.status === "upstream_failed" ? (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-rose-100 text-rose-800 border border-rose-200">
+                                      upstream_failed
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                                      refunded
+                                    </span>
+                                  );
+
+                                return (
+                                  <tr key={call.id} className="hover:bg-white/80 transition-colors">
+                                    <td className="py-2.5 pr-3">{statusPill}</td>
+                                    <td className="py-2.5 px-3 font-semibold text-neutral-900">
+                                      {stroopsToDisplay(call.amount_stroops)} USDC
+                                    </td>
+                                    <td className="py-2.5 px-3 text-neutral-600">
+                                      <span
+                                        title={call.agent_address}
+                                        className="cursor-help underline decoration-dotted"
+                                      >
+                                        {call.agent_address.slice(0, 6)}...{call.agent_address.slice(-6)}
+                                      </span>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-neutral-500 font-sans text-[11px]">
+                                      {new Date(call.created_at).toLocaleString()}
+                                    </td>
+                                    <td className="py-2.5 pl-3 text-right">
+                                      {call.tx_hash ? (
+                                        <a
+                                          href={`https://stellar.expert/explorer/testnet/tx/${call.tx_hash}`}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="inline-flex items-center gap-1 font-mono text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                                          title="View on Stellar Expert Testnet"
+                                        >
+                                          <span>
+                                            {call.tx_hash.slice(0, 8)}...{call.tx_hash.slice(-6)}
+                                          </span>
+                                          <ExternalLinkIcon className="h-3 w-3" />
+                                        </a>
+                                      ) : (
+                                        <span className="text-neutral-400 font-mono text-xs">—</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div className="p-4 text-center text-xs text-neutral-500 bg-white rounded border border-dashed border-neutral-200">
+                          No calls recorded for this endpoint yet.
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
                 </div>
-                <div className="text-right">
-                  <p className="text-sm font-bold text-neutral-900">
-                    {stroopsToDisplay(ep.price_stroops)} USDC
-                  </p>
-                  <p className="text-xs text-neutral-400 font-mono">{ep.price_stroops} stroops</p>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
-          <div className="mt-4 p-8 text-center border border-dashed border-neutral-200 rounded-md">
-            <p className="text-sm text-neutral-500">No endpoints registered yet.</p>
-            <p className="text-xs text-neutral-400 mt-1">
-              Click &quot;Register Endpoint&quot; once the prepare/submit pipeline is active.
-            </p>
+          /* Requirement 5: Empty state (no endpoints yet) with clear CTA */
+          <div className="p-12 text-center space-y-4">
+            <div className="mx-auto w-12 h-12 rounded-full bg-neutral-100 flex items-center justify-center text-neutral-400">
+              <svg
+                className="w-6 h-6"
+                fill="none"
+                viewBox="0 0 24 24"
+                strokeWidth={1.5}
+                stroke="currentColor"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244"
+                />
+              </svg>
+            </div>
+            <div className="max-w-md mx-auto">
+              <h3 className="text-base font-bold text-neutral-900">No Endpoints Registered Yet</h3>
+              <p className="mt-1 text-xs text-neutral-500">
+                Register your first upstream API endpoint to monetize it. Ramp402 protects it behind an on-chain x402 payment proxy.
+              </p>
+            </div>
+            <div>
+              <button
+                type="button"
+                disabled
+                className="inline-flex items-center px-4 py-2 border border-neutral-300 text-xs font-semibold rounded-md text-neutral-400 bg-neutral-100 cursor-not-allowed shadow-xs"
+                title="Endpoint registration flow prepares in the next step"
+              >
+                + Register Your First Endpoint
+              </button>
+            </div>
           </div>
         )}
-      </div>
-
-      {/* Recent Calls Section */}
-      <div className="border border-neutral-200 bg-white rounded-lg p-6">
-        <h2 className="text-lg font-semibold text-neutral-900">Recent Calls</h2>
-        <div className="mt-4 p-8 text-center border border-dashed border-neutral-200 rounded-md">
-          <p className="text-sm text-neutral-500">No calls recorded yet.</p>
-        </div>
       </div>
     </div>
   );

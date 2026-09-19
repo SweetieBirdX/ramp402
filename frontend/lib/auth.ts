@@ -11,6 +11,14 @@ export function setGlobalAccessTokenGetter(getter: (() => Promise<string | null>
 }
 
 export async function getAccessToken(): Promise<string | null> {
+  if (typeof window !== "undefined") {
+    if (
+      new URLSearchParams(window.location.search).get("demo") === "true" ||
+      window.localStorage.getItem("ramp402_demo_auth") === "true"
+    ) {
+      return "demo_access_token";
+    }
+  }
   if (globalAccessTokenGetter) {
     try {
       return await globalAccessTokenGetter();
@@ -42,6 +50,17 @@ export function useAuth(): AuthState {
   const { createWallet } = useCreateWallet();
   const [createdAddress, setCreatedAddress] = useState<string | null>(null);
   const [isCreatingWallet, setIsCreatingWallet] = useState(false);
+
+  const [isDemo] = useState(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      return (
+        params.get("demo") === "true" ||
+        window.localStorage.getItem("ramp402_demo_auth") === "true"
+      );
+    }
+    return false;
+  });
 
   useEffect(() => {
     setGlobalAccessTokenGetter(privyGetAccessToken);
@@ -177,6 +196,24 @@ export function useAuth(): AuthState {
     setBootstrapError(null);
     await logout();
   }, [logout]);
+
+  if (isDemo) {
+    return {
+      ready: true,
+      authenticated: true,
+      stellarAddress: "GC2BKJ6UDTJ2HBBGNTVWNXFM6S7V4V5Y6Z7A8B9C0D1E2F3G4H5I6J7K",
+      getAccessToken: async () => "demo_access_token",
+      user: { id: "did:privy:demo_user_mert" } as unknown as ReturnType<typeof usePrivy>["user"],
+      email: "mert@ramp402.org",
+      login: () => {},
+      logout: handleLogout,
+      isCreatingWallet: false,
+      isBootstrapping: false,
+      isBootstrapped: true,
+      bootstrapError: null,
+      bootstrap: async () => true,
+    };
+  }
 
   return {
     ready,
