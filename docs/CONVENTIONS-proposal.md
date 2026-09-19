@@ -1,19 +1,27 @@
 # Batched changes to CONVENTIONS.md — review before merging
 
-**Status: PROPOSED — not yet applied.** `docs/CONVENTIONS.md` is unchanged. Efe applies all of this
-in one edit once Ömer and Mert have agreed, per Rule 0, and everyone pulls immediately afterwards.
+**Status: A and B are APPLIED to `docs/CONVENTIONS.md`. C is still PROPOSED.**
 
-Three unrelated corrections are batched deliberately: each one on its own would cost the team a
-pull, a re-read and an interruption. One agreed edit, one commit, one sync.
+Three unrelated corrections were batched deliberately: each one on its own would cost the team a
+pull, a re-read and an interruption.
 
-| | What | Section | Who it affects |
-| --- | --- | --- | --- |
-| **A** | Operator identity, constructor, rotation, amount validation | §1.2 | Ömer (deploy + error codes) |
-| **B** | x402 v2 header names — the document names v1 headers that do not exist for Stellar | §1.3 | Ömer (P3-O3), Mert |
-| **C** | Encrypted upstream credentials column | §1.4 + `schema.sql` | Ömer (P3-O2) |
+| | What | Section | Status | Who it affects |
+| --- | --- | --- | --- | --- |
+| **A** | Operator identity, constructor, rotation, amount validation | §1.2 | **applied** | Ömer (deploy + error codes) |
+| **B** | x402 v2 header names — the document named v1 headers that do not exist for Stellar | §1.3 | **applied** | Ömer (P3-O3), Mert |
+| **C** | Encrypted upstream credentials column | §1.4 + `schema.sql` | **pending Ömer** | Ömer (P3-O2) |
 
-A is already implemented and deployed; B and C are ahead of the code. If the team rejects a point,
-the code changes to match — the document wins.
+**Why A and B went in without waiting, and C did not.** A describes a contract that is already
+deployed and running — §1.2 was factually wrong about live code, and Ömer writes P3-O2 against it
+next. B is a fact about the protocol, not a preference: Stellar's facilitator does not speak x402
+v1, so the header names §1.3 gave were unusable, and P3-O3 is the very next thing to be built
+against them. Neither obliges anyone to change a file they own.
+
+C does. It asks Ömer to add a column to `gateway/schema.sql`, which is his file, so it stays a
+proposal until he agrees. Nobody has touched `schema.sql`.
+
+If the team disagrees with anything already applied, say so and it comes back out — the document
+wins over the code, which is the whole point of Rule 0.
 
 Author: Efe · 19 September 2026
 

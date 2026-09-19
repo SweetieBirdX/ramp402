@@ -37,6 +37,9 @@ immediately afterwards.
 **Persistent storage (TTL must be extended on every write):**
 
 ```
+Operator:       Address                        → INSTANCE storage. The one keypair allowed to
+                                                 call record_call and settle. Set by the
+                                                 constructor, rotated by set_operator.
 NextEndpointId: u64                            → counter, +1 on every register_endpoint
 Endpoints:      Map<u64, EndpointInfo>         → EndpointInfo { seller: Address, price: i128 }
 Budgets:        Map<(Address, u64), BudgetEntry>
@@ -49,19 +52,34 @@ TreasuryTotal:  i128                           → cumulative 1% platform fee
 **Functions — signatures are fixed:**
 
 ```rust
+// 0) Runs once, inside the deployment transaction, and cannot be called again. The argument is
+// mandatory: no deployment can exist without an operator. No auth — the deployer chooses who
+// keeps the books, and from that moment only that keypair can write them.
+fn __constructor(env: Env, operator: Address);
+
 // 1) Called by the seller with their own require_auth(). The contract generates and returns the new endpoint_id.
 fn register_endpoint(env: Env, seller: Address, upstream_price: i128) -> u64;
 // event: EndpointRegistered { id, seller, price }
+// panic: InvalidPrice          if upstream_price <= 0
 
-// 2) Called by the gateway's single "operator" keypair (operator.require_auth()). The agent does NOT sign.
+// 2) Called by the gateway's single "operator" keypair. The agent does NOT sign.
+// The caller must BE the stored Operator, not merely an address that signed for itself.
 // On the FIRST call for an (agent, endpoint_id) pair the budget parameter is read and frozen.
 fn record_call(env: Env, operator: Address, agent: Address, endpoint_id: u64, budget: i128);
+// panic: NotOperator            if the caller is not the stored operator
 // panic: SpendingLimitExceeded  if spent + price > allocated
 // panic: EndpointNotFound       if endpoint_id does not exist
+// panic: InvalidAmount          if the pair's FIRST call passes budget <= 0. Validated on the
+//                               first call ONLY: later calls ignore the parameter entirely,
+//                               including the 0 the gateway sends when it has no header to
+//                               forward (§1.3).
 
 // 3) Called by the gateway's operator keypair. 1% to treasury, 99% credited to SellerBalances[seller].
 fn settle(env: Env, operator: Address, endpoint_id: u64, amount: i128);
 // event: FeeSettled { endpoint_id, seller_share, treasury_share }
+// panic: NotOperator            if the caller is not the stored operator
+// panic: EndpointNotFound       if endpoint_id does not exist
+// panic: InvalidAmount          if amount <= 0. A negative amount would DEBIT the seller.
 
 // 4) Called by the seller with their own require_auth(). Zeroes SellerBalances[seller], returns the amount.
 fn withdraw(env: Env, seller: Address) -> i128;
@@ -72,15 +90,44 @@ fn get_balance(env: Env, seller: Address) -> i128;
 
 // 6) View function — backs the gateway's price/limit checks.
 fn get_endpoint(env: Env, endpoint_id: u64) -> EndpointInfo;
+// panic: EndpointNotFound       if endpoint_id does not exist
+
+// 7) Hand the operator role to a different keypair, so a rotated OPERATOR_SECRET_KEY does not
+// force a redeployment — a redeploy mints a new CONTRACT_ID that has to be re-wired into the
+// gateway and the frontend. The CURRENT operator signs.
+fn set_operator(env: Env, new_operator: Address);
+// event: OperatorChanged { previous, current }
+// panic: NotOperator            if the current operator has not signed
+// NOTE: new_operator is NOT asked to sign, so an address typed wrong here locks the role away
+// and only a redeployment recovers it. Read it back with get_operator immediately afterwards.
+
+// 8) View function (no auth). Reads the stored operator back. Worth calling before a demo: if it
+// does not equal the public key of the gateway's OPERATOR_SECRET_KEY, every paid call fails.
+fn get_operator(env: Env) -> Address;
+// panic: NotOperator            if none is stored — the CONTRACT_ID predates the constructor
 ```
+
+**Contract error codes.** Append-only: a number that has been deployed is never reused for a
+different meaning.
+
+| Code | Name | Raised by | Means |
+| --- | --- | --- | --- |
+| 1 | `SpendingLimitExceeded` | `record_call` | `spent + price > allocated` |
+| 2 | `EndpointNotFound` | `record_call`, `settle`, `get_endpoint` | no such `endpoint_id` |
+| 3 | `InvalidPrice` | `register_endpoint` | `upstream_price <= 0` |
+| 4 | `InvalidAmount` | `settle`, `record_call` | `amount <= 0`, or a first-call `budget <= 0` |
+| 5 | `NotOperator` | `record_call`, `settle`, `set_operator`, `get_operator` | wrong caller, or no operator stored |
 
 **There are no sessions.** The budget is defined on an agent's **first call** to an endpoint and is
 fixed from then on. The grouping key is `(agent address, endpoint_id)`. There is no `session_id`,
 no `/session` route, and no state the agent has to carry.
 
 **Rounding rule for `settle`:** integer arithmetic only. `treasury_share = amount / 100` (integer
-division), then `seller_share = amount - treasury_share`. Rounding must never favour the payer or
-the seller over the treasury.
+division, truncating), then `seller_share = amount - treasury_share`. Deriving the second share by
+subtraction rather than a second division makes `seller_share + treasury_share == amount` an
+identity for every input: settlement can neither create nor lose a stroop. The sub-stroop remainder
+therefore stays with the seller — at most 0.99 of a stroop per settlement. The gateway must mirror
+this formula exactly; any other arithmetic makes the dashboard disagree with the chain.
 
 **Minimum `cargo test` set (six tests, all must be green):**
 
@@ -98,9 +145,17 @@ the seller over the treasury.
 | Function | Signer | Why |
 | --- | --- | --- |
 | `register_endpoint` | seller | endpoint ownership stays with the seller |
-| `record_call` | gateway operator keypair | the agent must not sign a second time on every call |
-| `settle` | gateway operator keypair | same reason; it only updates the ledger |
+| `record_call` | the stored operator | the agent must not sign a second time on every call |
+| `settle` | the stored operator | same reason; it only updates the ledger |
 | `withdraw` | seller (own balance only) | the only authority that moves money stays with the seller |
+| `set_operator` | the current operator | rotation without a redeploy, and nobody else may take the role |
+| `__constructor` | the deployer | fixes the operator at deploy time |
+
+"The operator" is **one specific address**, stored by the constructor and compared on every
+privileged call. A valid signature is not enough: `record_call` and `settle` verify that the caller
+IS the stored operator, so naming yourself as operator and signing for yourself is refused with
+`NotOperator`. Without that check anyone could credit any seller any balance through `settle`, and
+the gateway would pay it out — the chain is the source of truth for balances (§1.3).
 
 This contract **never holds or transfers tokens**. It is a ledger. The actual USDC movement happens
 off-chain from the platform pool account. That is a documented architectural decision, not an
@@ -155,7 +210,22 @@ the gateway builds an unsigned transaction and the frontend returns it signed.
 
 ### Agent side — no seller auth; this is the x402 protocol itself
 
-- `GET /proxy/:proxy_slug` — 402 → retry with `X-PAYMENT` → 200.
+- `GET /proxy/:proxy_slug` — 402 → retry with a payment → 200, over **x402 v2**.
+
+  Stellar's facilitator does not support v1 — there is no v1 entry for Stellar at
+  `https://x402.org/facilitator/supported` — so the v1 header names `X-PAYMENT` and
+  `X-PAYMENT-RESPONSE` are never used. The v2 headers are:
+
+  | Header | Direction | Carries |
+  | --- | --- | --- |
+  | `PAYMENT-REQUIRED` | gateway → agent, with the 402 | what must be paid, for this endpoint's price |
+  | `PAYMENT-SIGNATURE` | agent → gateway, on the retry | the agent's signed payment |
+  | `PAYMENT-RESPONSE` | gateway → agent, with the 200 | the facilitator's settlement receipt |
+
+  Build and parse these with `@x402/express`, pinned to `2.26.0` (spike S1). Never hand-construct
+  the header: its encoding is part of the protocol and changed between versions.
+
+  `X-Agent-Budget` below is **ours**, not x402's, and is unaffected by any of this.
 
   On the **first** call for a given `(agent, endpoint)` pair the header
   `X-Agent-Budget: <stroops>` is **mandatory**; if it is missing, return `400` with
