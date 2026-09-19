@@ -353,42 +353,93 @@ fn test_settle_splits_one_percent_correctly() {
 
 /// CONVENTIONS.md 1.2 test 5 - "An unauthorised `withdraw` (wrong signer) panics".
 #[test]
-#[ignore = "ramp_ledger bodies are still todo!() - logic lands in a later prompt"]
 fn test_unauthorized_withdraw_panics() {
     let t = TestSetup::new();
-    let _client = t.client();
+    let client = t.client();
+    let attacker = Address::generate(&t.env);
 
-    // MUST ASSERT:
-    // - Credit the seller a balance first (register + record_call + settle under
-    //   mock_all_auths), so the failure is genuinely about AUTHORISATION and not
-    //   about an empty balance.
-    // - Do NOT use env.mock_all_auths() for the withdraw itself - it would
-    //   authorise everything and the test would silently pass forever. Use
-    //   env.mock_auths(&[...]) naming ONLY the attacker, or set_auths.
-    // - An attacker address calling withdraw(seller) - i.e. signing as itself
-    //   while passing the victim's address - must fail the seller.require_auth().
-    // - After the failed attempt, SellerBalances[seller] is UNCHANGED (still the
-    //   full credited amount). A failed withdraw must not zero the balance.
-    // - The legitimate seller CAN then withdraw, proving the fixture wasn't
-    //   simply broken.
+    // Credit the seller first, so the failure below is genuinely about
+    // AUTHORISATION and not about an empty balance.
+    t.env.mock_all_auths();
+    let id = client.register_endpoint(&t.seller, &1_000);
+    client.record_call(&t.operator, &t.agent, &id, &5_000_000);
+    client.settle(&t.operator, &id, &5_000_000);
+    assert_eq!(client.get_balance(&t.seller), 4_950_000);
+
+    // ONLY the attacker has a signature from here. mock_all_auths() must not be
+    // left on: it would authorise everything and this test would pass for ever.
+    t.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &t.contract_id,
+            fn_name: "withdraw",
+            args: (t.seller.clone(),).into_val(&t.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    // The attacker signs as ITSELF while passing the victim's address. The
+    // signature it can produce is not the one `seller.require_auth()` wants.
+    let result = client.try_withdraw(&t.seller);
+    assert!(result.is_err());
+    // It failed on authorisation, not on one of our contract errors.
+    assert_ne!(result, Err(Ok(Error::EndpointNotFound.into())));
+    assert_ne!(result, Err(Ok(Error::SpendingLimitExceeded.into())));
+
+    // A failed withdraw must not zero the balance.
+    assert_eq!(client.get_balance(&t.seller), 4_950_000);
+
+    // The legitimate seller CAN withdraw - proving the fixture was not simply
+    // broken and the balance was reachable all along.
+    t.env.mock_auths(&[MockAuth {
+        address: &t.seller,
+        invoke: &MockAuthInvoke {
+            contract: &t.contract_id,
+            fn_name: "withdraw",
+            args: (t.seller.clone(),).into_val(&t.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_eq!(client.withdraw(&t.seller), 4_950_000);
+    assert_eq!(client.get_balance(&t.seller), 0);
 }
 
 /// CONVENTIONS.md 1.2 test 6 - "`SellerBalances` is zero after `withdraw`".
 #[test]
-#[ignore = "ramp_ledger bodies are still todo!() - logic lands in a later prompt"]
 fn test_withdraw_zeroes_balance() {
     let t = TestSetup::new();
-    let _client = t.client();
+    let client = t.client();
+    t.env.mock_all_auths();
 
-    // MUST ASSERT:
-    // - Credit a known balance via settle (e.g. 4_950_000 from a 5_000_000 settle).
-    // - get_balance(seller) == 4_950_000 BEFORE the withdraw.
-    // - withdraw(seller) RETURNS that same 4_950_000 (1.2: "Zeroes
-    //   SellerBalances[seller], returns the amount").
-    // - get_balance(seller) == 0 AFTER the withdraw.
-    // - A SECOND withdraw returns 0 and does not panic, and does not go negative.
-    // - The withdraw does NOT touch TreasuryTotal, and does not touch any OTHER
-    //   seller's balance.
+    let id = client.register_endpoint(&t.seller, &1_000);
+    client.settle(&t.operator, &id, &5_000_000);
+
+    // A second seller and the treasury, to prove the withdraw is surgical.
+    let other_seller = Address::generate(&t.env);
+    let other_id = client.register_endpoint(&other_seller, &1_000);
+    client.settle(&t.operator, &other_id, &1_000_000);
+    let treasury_before = t.treasury_total();
+    assert_eq!(treasury_before, 60_000); // 50_000 + 10_000
+
+    assert_eq!(client.get_balance(&t.seller), 4_950_000);
+    // 1.2: "Zeroes SellerBalances[seller], returns the amount".
+    assert_eq!(client.withdraw(&t.seller), 4_950_000);
+    assert_eq!(client.get_balance(&t.seller), 0);
+
+    // A SECOND withdraw returns 0, does not panic, and does not go negative.
+    // The gateway refuses amounts below the anchor's minimum before it ever
+    // gets here (CONVENTIONS.md 1.5); on chain this is simply a no-op.
+    assert_eq!(client.withdraw(&t.seller), 0);
+    assert_eq!(client.get_balance(&t.seller), 0);
+
+    // The withdraw touched neither the treasury nor the other seller.
+    assert_eq!(t.treasury_total(), treasury_before);
+    assert_eq!(client.get_balance(&other_seller), 990_000);
+
+    // Settling again after a withdraw starts from zero, not from the old
+    // balance - the seller is paid for new calls, not re-paid for old ones.
+    client.settle(&t.operator, &id, &2_000_000);
+    assert_eq!(client.get_balance(&t.seller), 1_980_000);
 }
 
 // ---------------------------------------------------------------------------
@@ -630,4 +681,61 @@ fn test_settle_requires_the_named_operators_signature() {
     // Nothing was credited.
     assert_eq!(client.get_balance(&t.seller), 0);
     assert_eq!(t.treasury_total(), 0);
+}
+
+/// `withdraw` on a seller who has never been settled to returns 0 rather than
+/// panicking, and does not create a balance entry on the way out.
+///
+/// The zero case is deliberate, and was ruled on rather than assumed: it keeps
+/// a retried `/api/withdraw/submit` a safe no-op instead of a transaction
+/// failure, and the too-small-withdrawal check belongs to the gateway, which
+/// must refuse anything under the anchor's 1 USDC minimum with a readable
+/// message (CONVENTIONS.md 1.5) - a check that covers zero already.
+#[test]
+fn test_withdraw_of_nothing_is_a_no_op() {
+    let t = TestSetup::new();
+    let client = t.client();
+    let stranger = Address::generate(&t.env);
+    t.env.mock_all_auths();
+
+    assert_eq!(client.withdraw(&stranger), 0);
+    assert_eq!(client.get_balance(&stranger), 0);
+    // Repeating it stays a no-op and never goes negative.
+    assert_eq!(client.withdraw(&stranger), 0);
+    assert_eq!(client.get_balance(&stranger), 0);
+}
+
+/// The whole demo path in one test: register, three paid calls against a frozen
+/// budget, settle each one, withdraw the lot. Guards the arithmetic END TO END,
+/// where a per-function test cannot see a mismatch between the pieces.
+#[test]
+fn test_full_lifecycle_register_call_settle_withdraw() {
+    let t = TestSetup::new();
+    let client = t.client();
+    t.env.mock_all_auths();
+
+    let price = 1_000_000_i128; // 0.1 USDC per call
+    let id = client.register_endpoint(&t.seller, &price);
+
+    // Three calls against a budget that allows exactly three.
+    for _ in 0..3 {
+        client.record_call(&t.operator, &t.agent, &id, &(price * 3));
+        client.settle(&t.operator, &id, &price);
+    }
+
+    // The fourth is refused: the budget is spent.
+    assert_eq!(
+        client.try_record_call(&t.operator, &t.agent, &id, &(price * 3)),
+        Err(Ok(Error::SpendingLimitExceeded.into()))
+    );
+
+    // 3 x 1_000_000 = 3_000_000 settled: 1% treasury, 99% seller.
+    assert_eq!(t.treasury_total(), 30_000);
+    assert_eq!(client.get_balance(&t.seller), 2_970_000);
+    assert_eq!(30_000 + 2_970_000, price * 3);
+
+    assert_eq!(client.withdraw(&t.seller), 2_970_000);
+    assert_eq!(client.get_balance(&t.seller), 0);
+    // The treasury's cut is not withdrawable by the seller and stays put.
+    assert_eq!(t.treasury_total(), 30_000);
 }

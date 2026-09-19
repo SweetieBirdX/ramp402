@@ -5,6 +5,22 @@
 //! transfers tokens; the actual USDC movement happens off-chain from the platform
 //! pool account. See docs/CONVENTIONS.md §1.2 — that document is the contract
 //! between the three components and the signatures below match it exactly.
+//!
+//! # Units
+//!
+//! Every amount in this contract is an integer count of **stroops**
+//! (1 USDC = 10_000_000 stroops). There are no decimals anywhere on chain;
+//! conversion for display happens in the frontend alone.
+//!
+//! # Authorisation
+//!
+//! | Function | Signer |
+//! | --- | --- |
+//! | [`RampLedger::register_endpoint`] | the seller |
+//! | [`RampLedger::record_call`] | the gateway's operator keypair |
+//! | [`RampLedger::settle`] | the gateway's operator keypair |
+//! | [`RampLedger::withdraw`] | the seller, for their own balance only |
+//! | [`RampLedger::get_balance`], [`RampLedger::get_endpoint`] | none, views |
 
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
@@ -78,6 +94,16 @@ pub struct FeeSettled {
     pub treasury_share: i128,
 }
 
+/// `Withdrawn { seller, amount }` — CONVENTIONS.md §1.2. `seller` is a topic so
+/// the gateway can follow one seller's withdrawals without scanning the stream.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Withdrawn {
+    #[topic]
+    pub seller: Address,
+    pub amount: i128,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -137,16 +163,37 @@ fn endpoint_or_panic(env: &Env, endpoint_id: u64) -> EndpointInfo {
 #[contract]
 pub struct RampLedger;
 
-// Everything but `withdraw` is live; that one is still a stub and lands in a
-// later prompt. The `allow` goes away with the last `todo!()`.
-#[allow(unused_variables)]
 #[contractimpl]
 impl RampLedger {
-    /// Called by the seller with their own `require_auth()`.
-    /// The contract generates and returns the new endpoint_id.
-    /// event: EndpointRegistered { id, seller, price }
+    /// Register a paid API endpoint and return the `endpoint_id` the ledger
+    /// assigns to it.
     ///
-    /// panic: InvalidPrice  if upstream_price <= 0
+    /// The id comes from a contract-side counter, never from the caller: it is
+    /// the on-chain identity of the endpoint, and the gateway stores its
+    /// decimal string form in SQLite. The gateway's own `proxy_slug` is a
+    /// separate, URL-facing identifier and is not known here.
+    ///
+    /// # Parameters
+    ///
+    /// - `seller` — the account that owns the endpoint and will be credited by
+    ///   [`RampLedger::settle`]. Must sign this call.
+    /// - `upstream_price` — the price of ONE call, in stroops. Charged in full
+    ///   on every [`RampLedger::record_call`], so it must be positive.
+    ///
+    /// # Authorisation
+    ///
+    /// `seller.require_auth()` — endpoint ownership stays with the seller, and
+    /// nobody can register an endpoint in someone else's name.
+    ///
+    /// # Panics
+    ///
+    /// - [`Error::InvalidPrice`] if `upstream_price <= 0`. A free or
+    ///   negative-priced endpoint has no meaning in a pay-per-call gateway, and
+    ///   a zero price would let an agent make unlimited calls against a budget.
+    ///
+    /// # Events
+    ///
+    /// [`EndpointRegistered`] `{ id, seller, price }`.
     pub fn register_endpoint(env: Env, seller: Address, upstream_price: i128) -> u64 {
         seller.require_auth();
 
@@ -189,12 +236,38 @@ impl RampLedger {
         id
     }
 
-    /// Called by the gateway's single "operator" keypair (`operator.require_auth()`).
-    /// The agent does NOT sign. On the FIRST call for an (agent, endpoint_id) pair
-    /// the budget parameter is read and frozen.
+    /// Record one paid call by `agent` against `endpoint_id`, charging the
+    /// endpoint's price against that agent's budget.
     ///
-    /// panic: SpendingLimitExceeded  if spent + price > allocated
-    /// panic: EndpointNotFound       if endpoint_id does not exist
+    /// **There are no sessions.** A budget belongs to an `(agent, endpoint_id)`
+    /// pair and is defined by that pair's FIRST call. The `budget` parameter is
+    /// read exactly once, when no entry exists yet; from then on it is ignored
+    /// entirely, so a later call passing a larger budget cannot raise the
+    /// ceiling. That is a security property, not an optimisation, and there is
+    /// a test guarding it.
+    ///
+    /// # Parameters
+    ///
+    /// - `operator` — the gateway's single operator keypair. Must sign.
+    /// - `agent` — the paying agent. Does NOT sign: an autonomous agent cannot
+    ///   be asked for a second signature on every request.
+    /// - `endpoint_id` — the endpoint being called, as returned by
+    ///   [`RampLedger::register_endpoint`].
+    /// - `budget` — the agent's total spending ceiling for this endpoint, in
+    ///   stroops. Read on the first call for the pair and frozen; ignored on
+    ///   every later call.
+    ///
+    /// # Authorisation
+    ///
+    /// `operator.require_auth()`.
+    ///
+    /// # Panics
+    ///
+    /// - [`Error::EndpointNotFound`] if `endpoint_id` was never registered.
+    /// - [`Error::SpendingLimitExceeded`] if `spent + price > allocated`.
+    ///   Spending exactly up to `allocated` is allowed. A refused call consumes
+    ///   no budget, and if it was the pair's first call it freezes nothing, so
+    ///   the agent may come back with a workable budget.
     pub fn record_call(env: Env, operator: Address, agent: Address, endpoint_id: u64, budget: i128) {
         operator.require_auth();
 
@@ -222,9 +295,40 @@ impl RampLedger {
         extend_persistent_ttl(&env, &DataKey::Budgets);
     }
 
-    /// Called by the gateway's operator keypair. 1% to treasury, 99% credited to
-    /// `SellerBalances[seller]`.
-    /// event: FeeSettled { endpoint_id, seller_share, treasury_share }
+    /// Split a settled amount between the platform treasury (1%) and the
+    /// endpoint's seller (99%), crediting the seller's withdrawable balance.
+    ///
+    /// Called after the upstream API has answered successfully. A call whose
+    /// upstream failed is recorded by the gateway as `upstream_failed` and is
+    /// never settled — payment taken but upstream failed is a real state, and
+    /// the seller is not paid for it.
+    ///
+    /// # Parameters
+    ///
+    /// - `operator` — the gateway's operator keypair. Must sign.
+    /// - `endpoint_id` — identifies the endpoint, and through it the seller to
+    ///   credit. The seller is read from the ledger, never passed in.
+    /// - `amount` — the amount to split, in stroops.
+    ///
+    /// # Rounding
+    ///
+    /// Integer arithmetic only: `treasury_share = amount / 100` (truncating),
+    /// then `seller_share = amount - treasury_share`. Because the second share
+    /// is a subtraction rather than a second division, the two always sum back
+    /// to `amount` exactly — settlement can neither create nor lose a stroop.
+    /// See the comment on the arithmetic below for the sub-stroop remainder.
+    ///
+    /// # Authorisation
+    ///
+    /// `operator.require_auth()`.
+    ///
+    /// # Panics
+    ///
+    /// - [`Error::EndpointNotFound`] if `endpoint_id` was never registered.
+    ///
+    /// # Events
+    ///
+    /// [`FeeSettled`] `{ endpoint_id, seller_share, treasury_share }`.
     pub fn settle(env: Env, operator: Address, endpoint_id: u64, amount: i128) {
         operator.require_auth();
 
@@ -279,21 +383,107 @@ impl RampLedger {
         .publish(&env);
     }
 
-    /// Called by the seller with their own `require_auth()`.
-    /// Zeroes `SellerBalances[seller]`, returns the amount.
-    /// event: Withdrawn { seller, amount }
+    /// Zero the seller's accrued balance and return what it held, so the
+    /// gateway can pay that amount out off chain.
+    ///
+    /// # THIS CONTRACT MOVES NO TOKENS
+    ///
+    /// `withdraw` transfers nothing. It is a ledger entry: it says "this seller
+    /// is no longer owed this amount" and returns the figure. The actual USDC
+    /// leaves the platform pool account off chain, and the gateway then turns
+    /// it into Turkish Lira through the Stellar anchor (SEP-10/38/12/6, paid
+    /// with a classic payment operation). This is a documented architectural
+    /// decision, not an oversight: the contract holds no funds, so there is
+    /// nothing in it to steal, and no token transfer can fail halfway.
+    ///
+    /// # Parameters
+    ///
+    /// - `seller` — the account whose balance is being cleared. Must sign, and
+    ///   can only ever clear its OWN balance: the address that signs and the
+    ///   address that is credited are the same parameter, so there is no way to
+    ///   name a victim.
+    ///
+    /// # Returns
+    ///
+    /// The balance that was cleared, in stroops. **Returns 0 when there is
+    /// nothing to withdraw** — this is deliberate and does not panic, so a
+    /// retried submission is a safe no-op rather than a transaction failure.
+    /// Rejecting a too-small withdrawal is the gateway's job: the anchor's
+    /// 1 USDC minimum is a lower bound to refuse with a clear message, never to
+    /// clamp to (CONVENTIONS.md §1.5).
+    ///
+    /// # Authorisation
+    ///
+    /// `seller.require_auth()` — the only authority that moves money stays with
+    /// the seller. A caller signing as itself while passing another seller's
+    /// address fails here, and the victim's balance is untouched.
+    ///
+    /// # Panics
+    ///
+    /// None. The balance cannot go negative: it is set to exactly 0.
+    ///
+    /// # Events
+    ///
+    /// [`Withdrawn`] `{ seller, amount }`, only when an amount actually moved.
     pub fn withdraw(env: Env, seller: Address) -> i128 {
-        todo!()
+        seller.require_auth();
+
+        let mut balances = seller_balances_map(&env);
+        let amount = balances.get(seller.clone()).unwrap_or(0);
+
+        // A withdrawal of nothing writes nothing: no storage write, no event,
+        // just 0 back to the caller. Beyond saving the fee, this keeps the
+        // `SellerBalances` map from growing an entry for every address that
+        // ever called `withdraw` — the whole map lives in one ledger entry, so
+        // unbounded keys would make every settlement more expensive.
+        if amount != 0 {
+            balances.set(seller.clone(), 0);
+            env.storage()
+                .persistent()
+                .set(&DataKey::SellerBalances, &balances);
+            extend_persistent_ttl(&env, &DataKey::SellerBalances);
+
+            Withdrawn { seller, amount }.publish(&env);
+        }
+
+        amount
     }
 
-    /// View function (no auth) — backs the gateway's `GET /api/balance`.
+    /// The seller's current withdrawable balance in stroops, or 0 if they have
+    /// never been settled to.
+    ///
+    /// Backs the gateway's `GET /api/balance`. The chain is the source of truth
+    /// for balances: the gateway reads this rather than summing its own `calls`
+    /// table, and if its SQLite cache is lost, balances are unaffected.
+    ///
+    /// # Authorisation
+    ///
+    /// None — a view. Balances are public, as everything on a public ledger is.
+    ///
+    /// # Panics
+    ///
+    /// None. An unknown seller reads 0 rather than failing, because the gateway
+    /// calls this for sellers who have just signed up.
     pub fn get_balance(env: Env, seller: Address) -> i128 {
         seller_balances_map(&env).get(seller).unwrap_or(0)
     }
 
-    /// View function — backs the gateway's price/limit checks.
+    /// The stored [`EndpointInfo`] — seller and per-call price — for an
+    /// endpoint.
     ///
-    /// panic: EndpointNotFound  if endpoint_id does not exist
+    /// Backs the gateway's price and limit checks: the price an agent is
+    /// charged is the one recorded here, never one supplied by the caller.
+    ///
+    /// # Authorisation
+    ///
+    /// None — a view.
+    ///
+    /// # Panics
+    ///
+    /// - [`Error::EndpointNotFound`] if `endpoint_id` was never registered.
+    ///   Unlike [`RampLedger::get_balance`], this does not have a meaningful
+    ///   zero value to return: a missing endpoint is an error, not an empty
+    ///   one.
     pub fn get_endpoint(env: Env, endpoint_id: u64) -> EndpointInfo {
         endpoint_or_panic(&env, endpoint_id)
     }
