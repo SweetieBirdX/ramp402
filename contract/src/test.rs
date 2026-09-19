@@ -1,7 +1,10 @@
 #![cfg(test)]
 
-use crate::{EndpointInfo, Error, RampLedger, RampLedgerClient};
-use soroban_sdk::{testutils::Address as _, Address, Env};
+use crate::{BudgetEntry, DataKey, EndpointInfo, Error, RampLedger, RampLedgerClient};
+use soroban_sdk::{
+    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    Address, Env, IntoVal, Map,
+};
 
 /// Reusable fixture for the `ramp_ledger` tests.
 ///
@@ -41,6 +44,24 @@ impl TestSetup {
 
     pub fn client(&self) -> RampLedgerClient<'_> {
         RampLedgerClient::new(&self.env, &self.contract_id)
+    }
+
+    /// The stored `BudgetEntry` for an (agent, endpoint_id) pair, or `None` if
+    /// no entry has been frozen yet.
+    ///
+    /// CONVENTIONS.md 1.2 gives the contract no budget view function, so the
+    /// tests read the persistent map directly from inside the contract's own
+    /// storage context. Asserting on `allocated` is the only way to prove the
+    /// frozen value is untouched, rather than inferring it from a later
+    /// rejection.
+    pub fn budget_entry(&self, agent: &Address, endpoint_id: u64) -> Option<BudgetEntry> {
+        self.env.as_contract(&self.contract_id, || {
+            self.env
+                .storage()
+                .persistent()
+                .get::<DataKey, Map<(Address, u64), BudgetEntry>>(&DataKey::Budgets)
+                .and_then(|budgets| budgets.get((agent.clone(), endpoint_id)))
+        })
     }
 }
 
@@ -105,48 +126,133 @@ fn test_register_endpoint_increments_id() {
 /// must NOT raise the limit". This is the security property named in CLAUDE.md's
 /// known traps.
 #[test]
-#[ignore = "ramp_ledger bodies are still todo!() - logic lands in a later prompt"]
 fn test_record_call_freezes_budget_on_first_call() {
     let t = TestSetup::new();
-    let _client = t.client();
+    let client = t.client();
+    t.env.mock_all_auths();
 
-    // MUST ASSERT:
-    // - Register an endpoint with a known price, e.g. price = 1_000 stroops.
-    // - FIRST record_call(operator, agent, endpoint_id, budget = 3_000) creates the
-    //   BudgetEntry with allocated = 3_000, spent = 1_000 (one call at price).
-    // - SECOND record_call for the SAME (agent, endpoint_id) passing a LARGER
-    //   budget = 999_999 must leave allocated STILL 3_000 - the parameter is read
-    //   once and frozen, never re-read.
-    // - Drive the agent to the frozen ceiling: the 4th call (spent would become
-    //   4_000 > 3_000) must fail, PROVING the larger budget never took effect.
-    // - A DIFFERENT agent on the same endpoint gets its own independent
-    //   BudgetEntry - the key is (agent, endpoint_id), not endpoint_id alone.
+    let id = client.register_endpoint(&t.seller, &1_000);
+
+    // FIRST call freezes the budget at 3_000 and spends one call's price.
+    client.record_call(&t.operator, &t.agent, &id, &3_000);
+    assert_eq!(
+        t.budget_entry(&t.agent, id),
+        Some(BudgetEntry {
+            allocated: 3_000,
+            spent: 1_000,
+        })
+    );
+
+    // SECOND call passes a MUCH larger budget. The parameter must be ignored
+    // outright: allocated stays 3_000. This is the security property.
+    client.record_call(&t.operator, &t.agent, &id, &999_999);
+    assert_eq!(
+        t.budget_entry(&t.agent, id),
+        Some(BudgetEntry {
+            allocated: 3_000,
+            spent: 2_000,
+        })
+    );
+
+    // Third call: still allowed, 3_000 spent of the frozen 3_000.
+    client.record_call(&t.operator, &t.agent, &id, &999_999);
+    assert_eq!(
+        t.budget_entry(&t.agent, id),
+        Some(BudgetEntry {
+            allocated: 3_000,
+            spent: 3_000,
+        })
+    );
+
+    // Fourth call would put spent at 4_000 > 3_000. It must fail EVEN THOUGH
+    // every call since the first has asked for 999_999 - proving the raised
+    // budget never took effect.
+    assert_eq!(
+        client.try_record_call(&t.operator, &t.agent, &id, &999_999),
+        Err(Ok(Error::SpendingLimitExceeded.into()))
+    );
+
+    // A DIFFERENT agent on the SAME endpoint gets its own independent entry:
+    // the key is (agent, endpoint_id), not endpoint_id alone.
+    let other_agent = Address::generate(&t.env);
+    assert_eq!(t.budget_entry(&other_agent, id), None);
+    client.record_call(&t.operator, &other_agent, &id, &5_000);
+    assert_eq!(
+        t.budget_entry(&other_agent, id),
+        Some(BudgetEntry {
+            allocated: 5_000,
+            spent: 1_000,
+        })
+    );
+    // ...and the exhausted agent is untouched by the newcomer spending.
+    assert_eq!(
+        t.budget_entry(&t.agent, id),
+        Some(BudgetEntry {
+            allocated: 3_000,
+            spent: 3_000,
+        })
+    );
+
+    // The SAME agent on a DIFFERENT endpoint is also independent.
+    let other_id = client.register_endpoint(&t.seller, &1_000);
+    client.record_call(&t.operator, &t.agent, &other_id, &2_000);
+    assert_eq!(
+        t.budget_entry(&t.agent, other_id),
+        Some(BudgetEntry {
+            allocated: 2_000,
+            spent: 1_000,
+        })
+    );
 }
 
 /// CONVENTIONS.md 1.2 test 3 - "Exceeding the budget panics with
 /// `SpendingLimitExceeded`".
 #[test]
-#[ignore = "ramp_ledger bodies are still todo!() - logic lands in a later prompt"]
 fn test_record_call_panics_when_budget_exceeded() {
     let t = TestSetup::new();
-    let _client = t.client();
+    let client = t.client();
+    t.env.mock_all_auths();
 
-    // MUST ASSERT:
-    // - Register an endpoint at a known price and record_call with a budget that
-    //   allows exactly N calls (e.g. price 1_000, budget 2_000 => 2 calls).
-    // - Calls 1..=N succeed.
-    // - Call N+1 fails with Error::SpendingLimitExceeded - assert the ERROR CODE,
-    //   not merely that it panicked. Use the generated fallible client:
-    //       assert_eq!(
-    //           client.try_record_call(&operator, &agent, &id, &budget),
-    //           Err(Ok(Error::SpendingLimitExceeded))
-    //       );
-    //   #[should_panic] would pass on ANY panic and would not distinguish
-    //   SpendingLimitExceeded from EndpointNotFound. Do not use it here.
-    // - The boundary is `spent + price > allocated` (1.2), so spending EXACTLY
-    //   up to allocated must SUCCEED. Test the == case, not just the > case.
-    // - After the rejection, `spent` is unchanged - a refused call must not
-    //   consume budget.
+    // price 1_000, budget 2_000 => exactly two calls.
+    let id = client.register_endpoint(&t.seller, &1_000);
+
+    client.record_call(&t.operator, &t.agent, &id, &2_000);
+    // The boundary is `spent + price > allocated`, so landing EXACTLY on
+    // allocated must succeed - not merely the strictly-under case.
+    client.record_call(&t.operator, &t.agent, &id, &2_000);
+    assert_eq!(
+        t.budget_entry(&t.agent, id),
+        Some(BudgetEntry {
+            allocated: 2_000,
+            spent: 2_000,
+        })
+    );
+
+    // Call three: assert on the ERROR CODE. #[should_panic] would pass on any
+    // panic and would not tell SpendingLimitExceeded from EndpointNotFound.
+    assert_eq!(
+        client.try_record_call(&t.operator, &t.agent, &id, &2_000),
+        Err(Ok(Error::SpendingLimitExceeded.into()))
+    );
+
+    // A refused call must not consume budget.
+    assert_eq!(
+        t.budget_entry(&t.agent, id),
+        Some(BudgetEntry {
+            allocated: 2_000,
+            spent: 2_000,
+        })
+    );
+
+    // A budget below a single call's price is refused on the FIRST call and
+    // freezes nothing - no entry is created, so the agent can come back with a
+    // workable budget instead of being locked out for ever.
+    let poor_agent = Address::generate(&t.env);
+    assert_eq!(
+        client.try_record_call(&t.operator, &poor_agent, &id, &999),
+        Err(Ok(Error::SpendingLimitExceeded.into()))
+    );
+    assert_eq!(t.budget_entry(&poor_agent, id), None);
 }
 
 /// CONVENTIONS.md 1.2 test 4 - "`settle` splits 1% / 99% correctly, and rounding
@@ -276,4 +382,122 @@ fn test_register_endpoint_rejects_non_positive_price() {
 
     // A rejected registration does not consume an id.
     assert_eq!(client.register_endpoint(&t.seller, &1), 1);
+}
+
+/// `record_call` requires the signature of the address it is handed as
+/// `operator` (CONVENTIONS.md 1.2: "operator.require_auth()"). An attacker who
+/// signs only for itself cannot push a call through in the operator's name.
+///
+/// NOTE the limit of what this can prove, and see the SECURITY GAP test below:
+/// CONVENTIONS.md 1.2 stores no operator address, so `require_auth()` proves
+/// only that whoever was NAMED signed - not that the named address is the
+/// gateway's operator keypair.
+#[test]
+fn test_record_call_requires_the_named_operators_signature() {
+    let t = TestSetup::new();
+    let client = t.client();
+    let attacker = Address::generate(&t.env);
+
+    // Fixture setup under mock_all_auths: a live endpoint and a frozen budget.
+    t.env.mock_all_auths();
+    let id = client.register_endpoint(&t.seller, &1_000);
+    client.record_call(&t.operator, &t.agent, &id, &3_000);
+
+    // From here ONLY the attacker has a signature. mock_all_auths() must not be
+    // left on - it would authorise everything and this test would pass for ever.
+    t.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &t.contract_id,
+            fn_name: "record_call",
+            args: (attacker.clone(), t.agent.clone(), id, 3_000_i128).into_val(&t.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    // The attacker names the REAL operator and cannot produce its signature.
+    let result = client.try_record_call(&t.operator, &t.agent, &id, &3_000);
+    assert!(result.is_err());
+    // It fails on AUTHORISATION, not on any of our contract errors - otherwise
+    // this test would still pass if the auth check were deleted and the call
+    // merely ran out of budget.
+    assert_ne!(result, Err(Ok(Error::SpendingLimitExceeded.into())));
+    assert_ne!(result, Err(Ok(Error::EndpointNotFound.into())));
+
+    // A refused call changes nothing.
+    assert_eq!(
+        t.budget_entry(&t.agent, id),
+        Some(BudgetEntry {
+            allocated: 3_000,
+            spent: 1_000,
+        })
+    );
+}
+
+/// SECURITY GAP, documented deliberately so it fails loudly when it is closed.
+///
+/// `operator` is a plain parameter and the contract stores no operator address,
+/// so `operator.require_auth()` authenticates whoever the caller NAMES. Anyone
+/// can therefore call `record_call` naming themselves, and freeze a budget for
+/// an arbitrary (agent, endpoint) pair - e.g. a tiny `allocated`, which locks
+/// that agent out of that endpoint for good, since the first call is the only
+/// one that sets the ceiling.
+///
+/// Closing this needs an operator address in storage, which CONVENTIONS.md 1.2
+/// does not have - a change for Efe to make with the team, not a silent one.
+/// When it lands, this test SHOULD start failing: invert it then.
+#[test]
+fn test_record_call_accepts_any_self_named_operator_todo_gap() {
+    let t = TestSetup::new();
+    let client = t.client();
+    let attacker = Address::generate(&t.env);
+    let victim_agent = Address::generate(&t.env);
+
+    t.env.mock_all_auths();
+    let id = client.register_endpoint(&t.seller, &1_000);
+
+    t.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &t.contract_id,
+            fn_name: "record_call",
+            args: (attacker.clone(), victim_agent.clone(), id, 1_000_i128).into_val(&t.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    // Signing only for itself, the attacker freezes the victim's ceiling at a
+    // single call. This SUCCEEDS today.
+    client.record_call(&attacker, &victim_agent, &id, &1_000);
+    assert_eq!(
+        t.budget_entry(&victim_agent, id),
+        Some(BudgetEntry {
+            allocated: 1_000,
+            spent: 1_000,
+        })
+    );
+
+    // ...and the real gateway can no longer record a call for that agent: the
+    // budget the agent actually paid for is never read, because an entry exists.
+    t.env.mock_all_auths();
+    assert_eq!(
+        client.try_record_call(&t.operator, &victim_agent, &id, &500_000),
+        Err(Ok(Error::SpendingLimitExceeded.into()))
+    );
+}
+
+/// `record_call` on an id that was never registered panics with
+/// `EndpointNotFound` - the second panic CONVENTIONS.md 1.2 names for it - and
+/// freezes no budget on the way out.
+#[test]
+fn test_record_call_panics_on_unknown_endpoint() {
+    let t = TestSetup::new();
+    let client = t.client();
+    t.env.mock_all_auths();
+
+    assert_eq!(
+        client.try_record_call(&t.operator, &t.agent, &404, &10_000),
+        Err(Ok(Error::EndpointNotFound.into()))
+    );
+    assert_eq!(t.budget_entry(&t.agent, 404), None);
 }

@@ -97,6 +97,24 @@ fn endpoints_map(env: &Env) -> Map<u64, EndpointInfo> {
         .unwrap_or_else(|| Map::new(env))
 }
 
+/// Read the `Budgets` map, or an empty one before the first recorded call.
+/// Key is the tuple `(agent, endpoint_id)` — CONVENTIONS.md §1.2. There are no
+/// sessions: this pair IS the identity of a budget.
+fn budgets_map(env: &Env) -> Map<(Address, u64), BudgetEntry> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Budgets)
+        .unwrap_or_else(|| Map::new(env))
+}
+
+/// The stored endpoint, or `EndpointNotFound`.
+fn endpoint_or_panic(env: &Env, endpoint_id: u64) -> EndpointInfo {
+    match endpoints_map(env).get(endpoint_id) {
+        Some(info) => info,
+        None => panic_with_error!(env, Error::EndpointNotFound),
+    }
+}
+
 #[contract]
 pub struct RampLedger;
 
@@ -160,7 +178,30 @@ impl RampLedger {
     /// panic: SpendingLimitExceeded  if spent + price > allocated
     /// panic: EndpointNotFound       if endpoint_id does not exist
     pub fn record_call(env: Env, operator: Address, agent: Address, endpoint_id: u64, budget: i128) {
-        todo!()
+        operator.require_auth();
+
+        let endpoint = endpoint_or_panic(&env, endpoint_id);
+
+        let mut budgets = budgets_map(&env);
+        let key = (agent, endpoint_id);
+
+        // THE security property (CLAUDE.md known traps): `budget` is read ONLY
+        // when there is no entry yet. Once an entry exists the parameter is not
+        // looked at again, so a later, larger budget cannot raise the ceiling.
+        let mut entry = budgets.get(key.clone()).unwrap_or(BudgetEntry {
+            allocated: budget,
+            spent: 0,
+        });
+
+        if entry.spent + endpoint.price > entry.allocated {
+            panic_with_error!(&env, Error::SpendingLimitExceeded);
+        }
+
+        entry.spent += endpoint.price;
+        budgets.set(key, entry);
+
+        env.storage().persistent().set(&DataKey::Budgets, &budgets);
+        extend_persistent_ttl(&env, &DataKey::Budgets);
     }
 
     /// Called by the gateway's operator keypair. 1% to treasury, 99% credited to
@@ -186,10 +227,7 @@ impl RampLedger {
     ///
     /// panic: EndpointNotFound  if endpoint_id does not exist
     pub fn get_endpoint(env: Env, endpoint_id: u64) -> EndpointInfo {
-        match endpoints_map(&env).get(endpoint_id) {
-            Some(info) => info,
-            None => panic_with_error!(&env, Error::EndpointNotFound),
-        }
+        endpoint_or_panic(&env, endpoint_id)
     }
 }
 
