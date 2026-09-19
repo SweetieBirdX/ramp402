@@ -256,6 +256,7 @@ CREATE TABLE IF NOT EXISTS endpoints (
   id TEXT PRIMARY KEY,
   seller_id TEXT NOT NULL REFERENCES sellers(id),
   upstream_url TEXT NOT NULL,
+  upstream_credentials_enc TEXT,   -- "v1:<iv>:<tag>:<ciphertext>" (AES-256-GCM); NULL if none
   proxy_slug TEXT NOT NULL UNIQUE,
   price_stroops INTEGER NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -288,6 +289,28 @@ Rules:
 - `endpoints.id` holds the decimal string form of the contract's `u64` endpoint_id (see §1.1).
 - SQLite is a cache for the UI. The chain is the source of truth for balances — if the database is
   lost, balances are unaffected and the cache can be rebuilt.
+
+**`endpoints.upstream_credentials_enc`** — the seller's upstream API credentials, encrypted at rest
+(checklist §C). A seller may register `https://user:pass@api.example.com/v1?api_key=…`; none of that
+may ever sit in a table in the clear, or reach a browser.
+
+- **Format:** `v1:<base64 iv>:<base64 tag>:<base64 ciphertext>`. AES-256-GCM with a fresh 96-bit IV
+  per value, keyed by `UPSTREAM_CRED_ENCRYPTION_KEY` (64 hex characters = 32 bytes). `v1` is a
+  format version, so the scheme can change later without guessing at old rows: a reader that does
+  not recognise the prefix must **fail**, never guess.
+- **The plaintext is JSON, not a bare secret:** `{ username?, password?, query? }`, where `query`
+  maps a parameter name to every value it had. Anyone assuming a plain string will write a
+  decryptor that fails on real rows.
+- **`upstream_url` holds the credential-free URL** — userinfo and secret-looking query parameters
+  removed. It is returned by `GET /api/endpoints` and must be safe to show in the UI.
+- **The encrypted column never leaves the gateway.** Not in any route response, not in an error
+  message, not in a log line. Only the proxy decrypts it, and only to re-attach the credentials to
+  the upstream request.
+- **`NULL` means the upstream needs no authentication.** That is the common case, not an error.
+- **There is no migration.** `CREATE TABLE IF NOT EXISTS` never adds a column to an existing table.
+  SQLite here is a rebuildable cache, so the migration is to delete `ramp402.db` and let it be
+  recreated. Anyone who pulls this and sees `no such column: upstream_credentials_enc` should run
+  `npx tsx scripts/reset-demo.ts`.
 
 ---
 

@@ -1,6 +1,20 @@
 # Batched changes to CONVENTIONS.md — review before merging
 
-**Status: A and B are APPLIED to `docs/CONVENTIONS.md`. C is still PROPOSED.**
+**Status: A, B and C are all APPLIED to `docs/CONVENTIONS.md`. This document is now history.**
+
+> **C was applied with Ömer's names, not the ones written below.** He had already built the
+> encryption in `gateway/src/credentials.ts` while this was being drafted, and his naming is better
+> on both counts, so the version in §1.4 is his:
+>
+> | | This document proposed | **§1.4 says (authoritative)** |
+> | --- | --- | --- |
+> | Column | `upstream_credentials` | **`upstream_credentials_enc`** |
+> | Format | `base64(iv):base64(tag):base64(ciphertext)` | **`v1:<iv>:<tag>:<ciphertext>`** |
+>
+> `_enc` makes the encryption legible at every call site so nobody can mistake the column for
+> plaintext, and the `v1:` prefix is a format version this draft lacked — it lets the scheme be
+> re-keyed later without guessing at old rows. **Do not use the names in section C below.** They are
+> left in place only so this document still reads as what was proposed at the time.
 
 Three unrelated corrections were batched deliberately: each one on its own would cost the team a
 pull, a re-read and an interruption.
@@ -9,7 +23,7 @@ pull, a re-read and an interruption.
 | --- | --- | --- | --- | --- |
 | **A** | Operator identity, constructor, rotation, amount validation | §1.2 | **applied** | Ömer (deploy + error codes) |
 | **B** | x402 v2 header names — the document named v1 headers that do not exist for Stellar | §1.3 | **applied** | Ömer (P3-O3), Mert |
-| **C** | Encrypted upstream credentials column | §1.4 + `schema.sql` | **pending Ömer** | Ömer (P3-O2) |
+| **C** | Encrypted upstream credentials column | §1.4 + `schema.sql` | **applied, renamed** | Ömer (P3-O2) |
 
 **Why A and B went in without waiting, and C did not.** A describes a contract that is already
 deployed and running — §1.2 was factually wrong about live code, and Ömer writes P3-O2 against it
@@ -17,8 +31,10 @@ next. B is a fact about the protocol, not a preference: Stellar's facilitator do
 v1, so the header names §1.3 gave were unusable, and P3-O3 is the very next thing to be built
 against them. Neither obliges anyone to change a file they own.
 
-C does. It asks Ömer to add a column to `gateway/schema.sql`, which is his file, so it stays a
-proposal until he agrees. Nobody has touched `schema.sql`.
+C did. It asked Ömer to add a column to `gateway/schema.sql`, which is his file, so it stayed a
+proposal until he agreed — which he has, having built the encryption side first. §1.4 now carries
+the column under **his** names (see the box above). `schema.sql` is still untouched by me: that edit
+is his to make, and the two copies must match.
 
 If the team disagrees with anything already applied, say so and it comes back out — the document
 wins over the code, which is the whole point of Rule 0.
