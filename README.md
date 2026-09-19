@@ -352,6 +352,21 @@ it reads `completed`, with the bank reference the anchor returned.
 
 If anything looks wrong mid-demo, the answer is almost always in `npx tsx scripts/preflight.ts`.
 
+### Proving it without a browser
+
+With the gateway running, `verify-e2e.ts` walks the same journey headlessly — a throwaway agent
+funds itself, pays for three calls, gets refused on the fourth, and the seller's on-chain balance is
+checked against the 99% share:
+
+```bash
+npx tsx scripts/verify-e2e.ts       # expect 7/7 PASS, about 80 seconds
+```
+
+It spends real testnet USDC. The withdrawal step needs a seller's Privy token, which a script cannot
+mint: set `PRIVY_ACCESS_TOKEN` to include it, or leave it unset and the script says plainly that it
+skipped that step. The off-ramp itself is covered for real by
+`cd gateway && npm run test:integration`.
+
 ## Architecture
 
 ```

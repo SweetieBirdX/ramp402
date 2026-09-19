@@ -232,6 +232,7 @@ in the console.
 ```bash
 npx tsx scripts/preflight.ts        # 8 checks: config, chain, pool, anchor, facilitator, cache
 npx tsx scripts/smoke-contract.ts   # the deployed contract, on chain, 8 steps
+npx tsx scripts/verify-e2e.ts       # the whole product, against a running gateway
 cd contract  && cargo test          # 23 tests
 cd gateway   && npm test            # 277 tests, offline
 cd gateway   && npm run test:integration   # the anchor, for real — moves 1 USDC
@@ -240,3 +241,23 @@ cd frontend  && npm run check       # typecheck, lint, production build
 
 `preflight.ts` is the one to run before a demo. It found a real inconsistency the first time it was
 run: the scripts and the gateway were pointed at two different anchors.
+
+`verify-e2e.ts` is the whole claim in one run. A recorded result:
+
+```
+[PASS] the agent funds itself — no account, no API key — 210.5888948 USDC via Friendbot and the DEX
+[PASS] a first call without X-Agent-Budget is refused, and charges nothing
+[PASS] 3 paid calls: 402 → pay → 200 — upstream data returned
+[PASS] the seller was credited 99% of what the agent paid — +0.2970000 USDC on chain
+[PASS] the frozen budget refuses the next call — 403 budget_exceeded
+```
+
+The agent's own balance went 210.5888948 → 210.2888948, exactly three calls at 0.1 USDC, and the
+seller gained 0.2970000 — three times the 99% share. Nothing there is asserted against our database;
+the balance is read from the contract.
+
+One ordering detail the script made concrete, worth knowing if you write an x402 client: a first
+call with no `X-Agent-Budget` is answered **402, not 400**. The gateway learns which agent is calling
+from the payment signature, so until one arrives it cannot know whether this is a first call for the
+pair. The 400 lands on the paid attempt, and the verified payment is cancelled rather than settled —
+so a refused call really does charge nothing.
