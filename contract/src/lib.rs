@@ -20,7 +20,14 @@
 //! | [`RampLedger::record_call`] | the gateway's operator keypair |
 //! | [`RampLedger::settle`] | the gateway's operator keypair |
 //! | [`RampLedger::withdraw`] | the seller, for their own balance only |
-//! | [`RampLedger::get_balance`], [`RampLedger::get_endpoint`] | none, views |
+//! | [`RampLedger::set_operator`] | the current operator |
+//! | [`RampLedger::get_balance`], [`RampLedger::get_endpoint`], [`RampLedger::get_operator`] | none, views |
+//!
+//! "The operator" is one specific address, stored at deploy time by
+//! [`RampLedger::__constructor`] and checked on every privileged call. A
+//! signature alone is not enough: `record_call` and `settle` verify that the
+//! caller IS the stored operator, so naming yourself as operator and signing
+//! for yourself does not work.
 
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
@@ -30,22 +37,33 @@ use soroban_sdk::{
 /// Ledgers in roughly 24h at the 5s close time — the unit every TTL below is
 /// expressed in.
 const DAY_IN_LEDGERS: u32 = 17_280;
-/// Every persistent write bumps the entry's TTL back up to ~30 days...
-const PERSISTENT_BUMP_LEDGERS: u32 = 30 * DAY_IN_LEDGERS;
+/// Every write bumps the entry's TTL back up to ~30 days...
+const STORAGE_BUMP_LEDGERS: u32 = 30 * DAY_IN_LEDGERS;
 /// ...and it is bumped whenever it has less than ~23 days left, so a demo that
 /// runs for a weekend can never watch its storage expire mid-call. Generous on
-/// purpose: expired persistent storage is unrecoverable in the moment.
-const PERSISTENT_THRESHOLD_LEDGERS: u32 = PERSISTENT_BUMP_LEDGERS - 7 * DAY_IN_LEDGERS;
+/// purpose: expired storage is unrecoverable in the moment.
+const STORAGE_THRESHOLD_LEDGERS: u32 = STORAGE_BUMP_LEDGERS - 7 * DAY_IN_LEDGERS;
 
 /// The first id handed out by `register_endpoint`. CONVENTIONS.md §1.1 shows the
 /// SQLite string forms as ("1", "2", …), so the counter is 1-based.
 const FIRST_ENDPOINT_ID: u64 = 1;
 
-/// Persistent storage keys. TTL must be extended on every write.
+/// Storage keys. TTL must be extended on every write.
+///
+/// Everything here is PERSISTENT storage, with one exception: [`DataKey::Operator`]
+/// lives in INSTANCE storage. It is a single address read on every privileged
+/// call, so it belongs with the contract instance — it is loaded with the
+/// contract, and its TTL rides along with the instance rather than being a
+/// separate entry that could expire on its own.
+///
 /// Value types are fixed by docs/CONVENTIONS.md §1.2.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
+    /// `Address` — INSTANCE storage. The one keypair allowed to call
+    /// `record_call` and `settle`. Set by the constructor, rotated by
+    /// `set_operator`.
+    Operator,
     /// `u64` — counter, +1 on every `register_endpoint`.
     NextEndpointId,
     /// `Map<u64, EndpointInfo>`.
@@ -104,6 +122,18 @@ pub struct Withdrawn {
     pub amount: i128,
 }
 
+/// `OperatorChanged { previous, current }` — published by
+/// [`RampLedger::set_operator`]. Both addresses are topics so a rotation can be
+/// found from either side.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperatorChanged {
+    #[topic]
+    pub previous: Address,
+    #[topic]
+    pub current: Address,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -112,18 +142,67 @@ pub enum Error {
     EndpointNotFound = 2,
     /// `register_endpoint` was called with `upstream_price <= 0`. A free or
     /// negative-priced endpoint has no meaning in a pay-per-call gateway.
-    /// NOTE: not yet listed in CONVENTIONS.md §1.2 — flagged to the team.
     InvalidPrice = 3,
+    /// An accounting amount was zero or negative: `settle`'s `amount`, or the
+    /// `budget` frozen by an agent's first `record_call`. Money only ever moves
+    /// forward through this ledger.
+    InvalidAmount = 4,
+    /// The caller is not the stored operator. The signature may well be valid —
+    /// it just belongs to the wrong address. Also raised if no operator is
+    /// stored at all, which can only mean the contract predates the constructor
+    /// and the wrong `CONTRACT_ID` is in use.
+    NotOperator = 5,
 }
 
 /// Bump a persistent entry's TTL. Called after EVERY persistent write
 /// (checklist §5b). The entry must already exist, so always `set` first.
 fn extend_persistent_ttl(env: &Env, key: &DataKey) {
-    env.storage().persistent().extend_ttl(
-        key,
-        PERSISTENT_THRESHOLD_LEDGERS,
-        PERSISTENT_BUMP_LEDGERS,
-    );
+    env.storage()
+        .persistent()
+        .extend_ttl(key, STORAGE_THRESHOLD_LEDGERS, STORAGE_BUMP_LEDGERS);
+}
+
+/// Bump the contract instance's TTL, which covers [`DataKey::Operator`] and the
+/// deployed wasm itself. An archived instance takes the whole contract offline,
+/// so this is bumped on every privileged call, not only when the operator
+/// changes.
+fn extend_instance_ttl(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(STORAGE_THRESHOLD_LEDGERS, STORAGE_BUMP_LEDGERS);
+}
+
+/// The stored operator address.
+///
+/// # Panics
+///
+/// [`Error::NotOperator`] if none is stored. Unreachable on a contract deployed
+/// with its constructor — which is every deployment, since the constructor
+/// argument is mandatory — so in practice this means the `CONTRACT_ID` points at
+/// an older build.
+fn stored_operator(env: &Env) -> Address {
+    match env.storage().instance().get(&DataKey::Operator) {
+        Some(operator) => operator,
+        None => panic_with_error!(env, Error::NotOperator),
+    }
+}
+
+/// Assert that `caller` IS the stored operator AND has signed.
+///
+/// Both halves matter. `require_auth()` alone proves only that whoever was named
+/// signed for themselves, which any address can do; the equality check is what
+/// ties the privilege to the gateway's one keypair.
+///
+/// # Panics
+///
+/// - [`Error::NotOperator`] if `caller` is not the stored operator.
+/// - An authorisation error if it is, but has not signed.
+fn require_operator(env: &Env, caller: &Address) {
+    if *caller != stored_operator(env) {
+        panic_with_error!(env, Error::NotOperator);
+    }
+    caller.require_auth();
+    extend_instance_ttl(env);
 }
 
 /// Read the `Endpoints` map, or an empty one before the first registration.
@@ -165,6 +244,96 @@ pub struct RampLedger;
 
 #[contractimpl]
 impl RampLedger {
+    /// Fix the operator identity at deploy time.
+    ///
+    /// Runs once, inside the deployment transaction, and cannot be called
+    /// again. The argument is mandatory, so no deployment can exist without an
+    /// operator.
+    ///
+    /// # Parameters
+    ///
+    /// - `operator` — the public key of the gateway's `OPERATOR_SECRET_KEY`.
+    ///   This is the ONLY address that will be able to call
+    ///   [`RampLedger::record_call`] and [`RampLedger::settle`].
+    ///
+    /// # Authorisation
+    ///
+    /// None: the deployer chooses the operator, and the operator itself does
+    /// not have to sign the deployment. Whoever deploys decides who keeps the
+    /// books, and from that moment only that keypair can write them.
+    ///
+    /// ```sh
+    /// stellar contract deploy --wasm ramp_ledger.wasm \
+    ///   --source-account ramp402-deployer --network testnet \
+    ///   -- --operator G...
+    /// ```
+    pub fn __constructor(env: Env, operator: Address) {
+        env.storage().instance().set(&DataKey::Operator, &operator);
+        extend_instance_ttl(&env);
+    }
+
+    /// Hand the operator role to a different keypair.
+    ///
+    /// This exists so that a rotated or regenerated `OPERATOR_SECRET_KEY` does
+    /// not force a redeployment. A redeploy would mint a new `CONTRACT_ID`,
+    /// which then has to be re-wired into the gateway and the frontend — the
+    /// one failure mode this project can least afford mid-demo.
+    ///
+    /// # Parameters
+    ///
+    /// - `new_operator` — the address that takes over. **Not verified to be
+    ///   controllable**: it is not asked to sign, so an address typed wrong here
+    ///   locks the role away and only a redeployment recovers it. Read it back
+    ///   with [`RampLedger::get_operator`] immediately afterwards.
+    ///
+    /// # Authorisation
+    ///
+    /// The CURRENT stored operator must sign. Nobody else can rotate the role,
+    /// including the original deployer.
+    ///
+    /// # Panics
+    ///
+    /// - [`Error::NotOperator`] if the current operator has not signed.
+    ///
+    /// # Events
+    ///
+    /// [`OperatorChanged`] `{ previous, current }`.
+    pub fn set_operator(env: Env, new_operator: Address) {
+        let previous = stored_operator(&env);
+        previous.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Operator, &new_operator);
+        extend_instance_ttl(&env);
+
+        OperatorChanged {
+            previous,
+            current: new_operator,
+        }
+        .publish(&env);
+    }
+
+    /// The address currently allowed to call [`RampLedger::record_call`] and
+    /// [`RampLedger::settle`].
+    ///
+    /// Worth calling from `scripts/preflight.ts` before a demo: if this does not
+    /// equal the public key of the gateway's `OPERATOR_SECRET_KEY`, every paid
+    /// call will fail with [`Error::NotOperator`], and knowing that in advance
+    /// costs one RPC call instead of a debugging session.
+    ///
+    /// # Authorisation
+    ///
+    /// None — a view.
+    ///
+    /// # Panics
+    ///
+    /// - [`Error::NotOperator`] if no operator is stored, which means the
+    ///   `CONTRACT_ID` points at a build older than the constructor.
+    pub fn get_operator(env: Env) -> Address {
+        stored_operator(&env)
+    }
+
     /// Register a paid API endpoint and return the `endpoint_id` the ledger
     /// assigns to it.
     ///
@@ -259,17 +428,23 @@ impl RampLedger {
     ///
     /// # Authorisation
     ///
-    /// `operator.require_auth()`.
+    /// `operator` must BE the stored operator and must sign. A signature from
+    /// some other address, even a valid one, is refused.
     ///
     /// # Panics
     ///
+    /// - [`Error::NotOperator`] if the caller is not the stored operator.
     /// - [`Error::EndpointNotFound`] if `endpoint_id` was never registered.
+    /// - [`Error::InvalidAmount`] if the pair's FIRST call passes
+    ///   `budget <= 0`. Validated only on the first call: on later calls the
+    ///   parameter is ignored entirely, including when the gateway has no
+    ///   `X-Agent-Budget` header to forward and sends 0.
     /// - [`Error::SpendingLimitExceeded`] if `spent + price > allocated`.
     ///   Spending exactly up to `allocated` is allowed. A refused call consumes
     ///   no budget, and if it was the pair's first call it freezes nothing, so
     ///   the agent may come back with a workable budget.
     pub fn record_call(env: Env, operator: Address, agent: Address, endpoint_id: u64, budget: i128) {
-        operator.require_auth();
+        require_operator(&env, &operator);
 
         let endpoint = endpoint_or_panic(&env, endpoint_id);
 
@@ -279,9 +454,19 @@ impl RampLedger {
         // THE security property (CLAUDE.md known traps): `budget` is read ONLY
         // when there is no entry yet. Once an entry exists the parameter is not
         // looked at again, so a later, larger budget cannot raise the ceiling.
-        let mut entry = budgets.get(key.clone()).unwrap_or(BudgetEntry {
-            allocated: budget,
-            spent: 0,
+        //
+        // The validation below sits inside the same branch for exactly that
+        // reason. Checking `budget` on every call would break the rule the
+        // branch exists to enforce: §1.3 lets the gateway ignore the header
+        // after the first call, so a later call may legitimately carry 0.
+        let mut entry = budgets.get(key.clone()).unwrap_or_else(|| {
+            if budget <= 0 {
+                panic_with_error!(&env, Error::InvalidAmount);
+            }
+            BudgetEntry {
+                allocated: budget,
+                spent: 0,
+            }
         });
 
         if entry.spent + endpoint.price > entry.allocated {
@@ -320,17 +505,28 @@ impl RampLedger {
     ///
     /// # Authorisation
     ///
-    /// `operator.require_auth()`.
+    /// `operator` must BE the stored operator and must sign. This is the
+    /// function that decides what sellers are owed, so the identity check is
+    /// what stands between the ledger and an invented balance.
     ///
     /// # Panics
     ///
+    /// - [`Error::NotOperator`] if the caller is not the stored operator.
     /// - [`Error::EndpointNotFound`] if `endpoint_id` was never registered.
+    /// - [`Error::InvalidAmount`] if `amount <= 0`. A negative amount would
+    ///   DEBIT the seller, and nothing in this ledger is allowed to run
+    ///   backwards; zero would emit an event for a settlement that never
+    ///   happened.
     ///
     /// # Events
     ///
     /// [`FeeSettled`] `{ endpoint_id, seller_share, treasury_share }`.
     pub fn settle(env: Env, operator: Address, endpoint_id: u64, amount: i128) {
-        operator.require_auth();
+        require_operator(&env, &operator);
+
+        if amount <= 0 {
+            panic_with_error!(&env, Error::InvalidAmount);
+        }
 
         let endpoint = endpoint_or_panic(&env, endpoint_id);
 
@@ -346,14 +542,13 @@ impl RampLedger {
         //   amount 5_000_000 -> treasury     50_000, seller 4_950_000 (exact)
         //   amount       333 -> treasury          3, seller       330
         //
-        // NOTE for the team: with truncating division the sub-stroop remainder
-        // (0.33 of a stroop in the 333 case) stays with the SELLER, so the
-        // prose in §1.2 — "rounding must never favour the payer or the seller
-        // over the treasury" — does not hold literally for amounts that are not
-        // divisible by 100. The formula is the specified one and the gateway
-        // must mirror it exactly; the sentence is what needs amending. Ceiling
-        // division, `(amount + 99) / 100`, is the one-line alternative if the
-        // team decides the prose wins instead.
+        // The sub-stroop remainder (0.33 of a stroop in the 333 case) stays
+        // with the SELLER. §1.2's prose says rounding must never favour the
+        // seller over the treasury, which is not literally true of the formula
+        // §1.2 itself specifies; the formula is what the gateway mirrors, and
+        // docs/CONVENTIONS-proposal.md carries the correction to the sentence.
+        // Ceiling division, `(amount + 99) / 100`, is the one-line alternative
+        // if the team decides the prose wins instead.
         let treasury_share = amount / 100;
         let seller_share = amount - treasury_share;
 

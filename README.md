@@ -20,11 +20,14 @@ _TBD._
 
 ## Contract
 
-> **STUB DEPLOYMENT — will be replaced once the real logic lands.**
-> Every function is currently `todo!()`, so invoking one traps with
-> `UnreachableCodeReached`. This ID exists so the gateway and frontend can be wired
-> up now; it **will change** when the real contract is deployed. If Soroban calls
-> start failing for no clear reason, check this value first.
+> **THE DEPLOYED ID BELOW IS STILL THE STUB — the real contract is built but not
+> yet deployed.** Every function in that deployment is `todo!()`, so invoking one
+> traps with `UnreachableCodeReached`. The ID exists so the gateway and frontend
+> can be wired up now; it **will change** when the real contract is deployed. If
+> Soroban calls start failing for no clear reason, check this value first.
+>
+> The real contract takes a **mandatory `--operator` constructor argument**, so
+> the deploy command below is not the one the stub was deployed with.
 
 | | |
 | --- | --- |
@@ -34,7 +37,11 @@ _TBD._
 | soroban-sdk | 23.5.3 |
 | Stellar CLI | 25.2.0 |
 
-Build and deploy:
+Build and deploy. The `--operator` argument after `--` is the contract's
+constructor: it is the public key of the gateway's `OPERATOR_SECRET_KEY`, and it
+is the only address that will be allowed to call `record_call` and `settle`.
+Deploying without it fails — there is no such thing as a ramp_ledger without an
+operator.
 
 ```bash
 cd contract
@@ -43,7 +50,9 @@ stellar contract deploy \
   --wasm target/wasm32-unknown-unknown/release/ramp_ledger.wasm \
   --source-account ramp402-deployer \
   --network testnet \
-  --alias ramp_ledger_stub
+  --alias ramp_ledger \
+  -- \
+  --operator G...OPERATOR_PUBLIC_KEY
 ```
 
 Confirm a deployment is live — this reads the spec back off the network, so it
@@ -52,6 +61,29 @@ proves the contract is addressable without needing any function to work:
 ```bash
 stellar contract info interface --id <CONTRACT_ID> --network testnet
 ```
+
+Confirm it has the operator the gateway actually runs with. If these two differ,
+every paid call fails with `NotOperator` (error 5), so it is worth checking
+before a demo rather than during one:
+
+```bash
+stellar contract invoke --id <CONTRACT_ID> --network testnet \
+  --source-account ramp402-deployer -- get_operator
+```
+
+If the operator key is ever regenerated, **rotate rather than redeploy** —
+redeploying mints a new `CONTRACT_ID` that then has to be re-wired into the
+gateway and the frontend. The current operator signs the handover:
+
+```bash
+stellar contract invoke --id <CONTRACT_ID> --network testnet \
+  --source-account ramp402-operator \
+  -- set_operator --new_operator G...NEW_OPERATOR_PUBLIC_KEY
+```
+
+A wrong address here cannot be undone — only the stored operator may rotate, so
+rotating to a key nobody holds means redeploying. Read it back with
+`get_operator` immediately afterwards.
 
 `contract/Cargo.lock` is committed on purpose: it pins `ed25519-dalek` to 2.2.0
 around a `soroban-env-host` 23.0.1 resolution break that otherwise stops

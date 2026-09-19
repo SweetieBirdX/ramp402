@@ -19,6 +19,8 @@ pub struct TestSetup {
     /// Pays per call. Never signs; the operator acts on its behalf.
     pub agent: Address,
     /// The gateway's single operator keypair: signs `record_call` and `settle`.
+    /// Stored in the contract by the constructor, so it is the one address
+    /// those two functions accept.
     pub operator: Address,
     /// NOTE: `TreasuryTotal` is a plain `i128` counter in storage, not an
     /// address - no function in CONVENTIONS.md 1.2 takes a treasury address.
@@ -31,12 +33,16 @@ pub struct TestSetup {
 impl TestSetup {
     pub fn new() -> Self {
         let env = Env::default();
-        let contract_id = env.register(RampLedger, ());
+        // The operator is fixed at deploy time, so it has to exist before the
+        // contract does - exactly as in the real deployment, where its address
+        // is a mandatory constructor argument.
+        let operator = Address::generate(&env);
+        let contract_id = env.register(RampLedger, (operator.clone(),));
         Self {
             seller: Address::generate(&env),
             agent: Address::generate(&env),
-            operator: Address::generate(&env),
             treasury: Address::generate(&env),
+            operator,
             contract_id,
             env,
         }
@@ -498,14 +504,10 @@ fn test_register_endpoint_rejects_non_positive_price() {
     assert_eq!(client.register_endpoint(&t.seller, &1), 1);
 }
 
-/// `record_call` requires the signature of the address it is handed as
-/// `operator` (CONVENTIONS.md 1.2: "operator.require_auth()"). An attacker who
-/// signs only for itself cannot push a call through in the operator's name.
-///
-/// NOTE the limit of what this can prove, and see the SECURITY GAP test below:
-/// CONVENTIONS.md 1.2 stores no operator address, so `require_auth()` proves
-/// only that whoever was NAMED signed - not that the named address is the
-/// gateway's operator keypair.
+/// Naming the real operator is not enough: `record_call` also needs that
+/// address to have SIGNED. This covers the half of the check that
+/// `require_auth()` does; `test_record_call_rejects_a_self_named_operator`
+/// covers the identity half.
 #[test]
 fn test_record_call_requires_the_named_operators_signature() {
     let t = TestSetup::new();
@@ -548,20 +550,16 @@ fn test_record_call_requires_the_named_operators_signature() {
     );
 }
 
-/// SECURITY GAP, documented deliberately so it fails loudly when it is closed.
+/// The attack that `NotOperator` closes, kept as the regression test for it.
 ///
-/// `operator` is a plain parameter and the contract stores no operator address,
-/// so `operator.require_auth()` authenticates whoever the caller NAMES. Anyone
-/// can therefore call `record_call` naming themselves, and freeze a budget for
-/// an arbitrary (agent, endpoint) pair - e.g. a tiny `allocated`, which locks
-/// that agent out of that endpoint for good, since the first call is the only
-/// one that sets the ceiling.
-///
-/// Closing this needs an operator address in storage, which CONVENTIONS.md 1.2
-/// does not have - a change for Efe to make with the team, not a silent one.
-/// When it lands, this test SHOULD start failing: invert it then.
+/// Before the operator was stored, `operator` was a plain parameter and
+/// `require_auth()` authenticated whoever the caller NAMED. Anyone could call
+/// `record_call` naming themselves and freeze a budget for an arbitrary
+/// (agent, endpoint) pair - a tiny `allocated` locks that agent out of that
+/// endpoint for good, because the first call is the only one that sets the
+/// ceiling. Now the caller must BE the stored operator.
 #[test]
-fn test_record_call_accepts_any_self_named_operator_todo_gap() {
+fn test_record_call_rejects_a_self_named_operator() {
     let t = TestSetup::new();
     let client = t.client();
     let attacker = Address::generate(&t.env);
@@ -570,6 +568,7 @@ fn test_record_call_accepts_any_self_named_operator_todo_gap() {
     t.env.mock_all_auths();
     let id = client.register_endpoint(&t.seller, &1_000);
 
+    // The attacker has a perfectly valid signature - for ITSELF.
     t.env.mock_auths(&[MockAuth {
         address: &attacker,
         invoke: &MockAuthInvoke {
@@ -580,24 +579,53 @@ fn test_record_call_accepts_any_self_named_operator_todo_gap() {
         },
     }]);
 
-    // Signing only for itself, the attacker freezes the victim's ceiling at a
-    // single call. This SUCCEEDS today.
-    client.record_call(&attacker, &victim_agent, &id, &1_000);
+    assert_eq!(
+        client.try_record_call(&attacker, &victim_agent, &id, &1_000),
+        Err(Ok(Error::NotOperator.into()))
+    );
+
+    // Nothing was frozen, so the victim's real budget is still the one that
+    // will be read on its first genuine call.
+    assert_eq!(t.budget_entry(&victim_agent, id), None);
+    t.env.mock_all_auths();
+    client.record_call(&t.operator, &victim_agent, &id, &500_000);
     assert_eq!(
         t.budget_entry(&victim_agent, id),
         Some(BudgetEntry {
-            allocated: 1_000,
+            allocated: 500_000,
             spent: 1_000,
         })
     );
+}
 
-    // ...and the real gateway can no longer record a call for that agent: the
-    // budget the agent actually paid for is never read, because an entry exists.
+/// The same attack against `settle`, where it was worth real money: a
+/// self-named operator could credit any seller any balance, and the gateway
+/// pays out against the chain because the chain is the source of truth.
+#[test]
+fn test_settle_rejects_a_self_named_operator() {
+    let t = TestSetup::new();
+    let client = t.client();
+    let attacker = Address::generate(&t.env);
+
     t.env.mock_all_auths();
+    let id = client.register_endpoint(&t.seller, &1_000);
+
+    t.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &t.contract_id,
+            fn_name: "settle",
+            args: (attacker.clone(), id, 900_000_000_i128).into_val(&t.env),
+            sub_invokes: &[],
+        },
+    }]);
+
     assert_eq!(
-        client.try_record_call(&t.operator, &victim_agent, &id, &500_000),
-        Err(Ok(Error::SpendingLimitExceeded.into()))
+        client.try_settle(&attacker, &id, &900_000_000),
+        Err(Ok(Error::NotOperator.into()))
     );
+    assert_eq!(client.get_balance(&t.seller), 0);
+    assert_eq!(t.treasury_total(), 0);
 }
 
 /// `record_call` on an id that was never registered panics with
@@ -651,10 +679,9 @@ fn test_settle_panics_on_unknown_endpoint() {
     assert_eq!(t.treasury_total(), 0);
 }
 
-/// `settle` requires the signature of the address it is handed as `operator`.
-/// The same limit applies as in `test_record_call_requires_the_named_operators_signature`:
-/// nothing on chain says WHICH address is the operator - see the SECURITY GAP
-/// note there, which is worse here because `settle` credits balances.
+/// Naming the real operator is not enough for `settle` either: that address
+/// must have signed. The identity half is covered by
+/// `test_settle_rejects_a_self_named_operator`.
 #[test]
 fn test_settle_requires_the_named_operators_signature() {
     let t = TestSetup::new();
@@ -738,4 +765,200 @@ fn test_full_lifecycle_register_call_settle_withdraw() {
     assert_eq!(client.get_balance(&t.seller), 0);
     // The treasury's cut is not withdrawable by the seller and stays put.
     assert_eq!(t.treasury_total(), 30_000);
+}
+
+// ---------------------------------------------------------------------------
+// Operator identity, rotation and amount validation.
+// ---------------------------------------------------------------------------
+
+/// The constructor stores the operator, and `get_operator` reads it back
+/// without auth - the check `scripts/preflight.ts` can make before a demo.
+#[test]
+fn test_constructor_stores_the_operator() {
+    let t = TestSetup::new();
+    let client = t.client();
+
+    // No mock_all_auths(): a view needs no signature.
+    assert_eq!(client.get_operator(), t.operator);
+}
+
+/// `set_operator` hands the role over: the new operator works, the old one
+/// stops working, and the ledger written under the old one is untouched.
+#[test]
+fn test_set_operator_rotates_the_role() {
+    let t = TestSetup::new();
+    let client = t.client();
+    let new_operator = Address::generate(&t.env);
+
+    t.env.mock_all_auths();
+    let id = client.register_endpoint(&t.seller, &1_000);
+    client.record_call(&t.operator, &t.agent, &id, &10_000);
+    client.settle(&t.operator, &id, &5_000_000);
+
+    client.set_operator(&new_operator);
+    assert_eq!(client.get_operator(), new_operator);
+
+    // The new operator can do the job...
+    client.record_call(&new_operator, &t.agent, &id, &10_000);
+    client.settle(&new_operator, &id, &5_000_000);
+    assert_eq!(client.get_balance(&t.seller), 9_900_000);
+    assert_eq!(
+        t.budget_entry(&t.agent, id),
+        Some(BudgetEntry {
+            allocated: 10_000,
+            spent: 2_000,
+        })
+    );
+
+    // ...and the OLD operator cannot, even though it is still a real keypair
+    // with a valid signature. mock_all_auths() is still on, so this proves the
+    // identity check and not a missing signature.
+    assert_eq!(
+        client.try_record_call(&t.operator, &t.agent, &id, &10_000),
+        Err(Ok(Error::NotOperator.into()))
+    );
+    assert_eq!(
+        client.try_settle(&t.operator, &id, &5_000_000),
+        Err(Ok(Error::NotOperator.into()))
+    );
+}
+
+/// Only the CURRENT operator may rotate the role - not the deployer, not the
+/// seller, not an attacker holding a valid signature of its own.
+#[test]
+fn test_set_operator_requires_the_current_operator() {
+    let t = TestSetup::new();
+    let client = t.client();
+    let attacker = Address::generate(&t.env);
+
+    // ONLY the attacker has a signature, and it is asking to become operator.
+    t.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &t.contract_id,
+            fn_name: "set_operator",
+            args: (attacker.clone(),).into_val(&t.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = client.try_set_operator(&attacker);
+    assert!(result.is_err());
+    assert_eq!(client.get_operator(), t.operator);
+
+    // The seller cannot take the role either.
+    t.env.mock_auths(&[MockAuth {
+        address: &t.seller,
+        invoke: &MockAuthInvoke {
+            contract: &t.contract_id,
+            fn_name: "set_operator",
+            args: (t.seller.clone(),).into_val(&t.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_set_operator(&t.seller).is_err());
+    assert_eq!(client.get_operator(), t.operator);
+}
+
+/// Rotation is chainable: B can hand on to C once A has handed on to B. A must
+/// not be able to take the role back.
+#[test]
+fn test_set_operator_chains_and_does_not_look_back() {
+    let t = TestSetup::new();
+    let client = t.client();
+    let second = Address::generate(&t.env);
+    let third = Address::generate(&t.env);
+    t.env.mock_all_auths();
+
+    client.set_operator(&second);
+    client.set_operator(&third);
+    assert_eq!(client.get_operator(), third);
+
+    // The first operator is just another address now. mock_all_auths() cannot
+    // help it: the contract is comparing addresses, not checking signatures.
+    let id = client.register_endpoint(&t.seller, &1_000);
+    assert_eq!(
+        client.try_record_call(&t.operator, &t.agent, &id, &10_000),
+        Err(Ok(Error::NotOperator.into()))
+    );
+    client.record_call(&third, &t.agent, &id, &10_000);
+}
+
+/// `settle` refuses a zero or negative amount. A negative one would DEBIT the
+/// seller - with a self-named operator that was a way to bury a balance below
+/// zero, and it is nonsense from the gateway in any case.
+#[test]
+fn test_settle_rejects_zero_and_negative_amounts() {
+    let t = TestSetup::new();
+    let client = t.client();
+    t.env.mock_all_auths();
+
+    let id = client.register_endpoint(&t.seller, &1_000);
+    client.settle(&t.operator, &id, &5_000_000);
+    let balance = client.get_balance(&t.seller);
+
+    for bad in [0_i128, -1, -5_000_000] {
+        assert_eq!(
+            client.try_settle(&t.operator, &id, &bad),
+            Err(Ok(Error::InvalidAmount.into())),
+            "settle({}) must be refused",
+            bad
+        );
+    }
+
+    // Nothing moved in either direction.
+    assert_eq!(client.get_balance(&t.seller), balance);
+    assert_eq!(t.treasury_total(), 50_000);
+
+    // The smallest meaningful settlement is still allowed: 1 stroop, of which
+    // the treasury's truncated 1% is nothing at all.
+    client.settle(&t.operator, &id, &1);
+    assert_eq!(client.get_balance(&t.seller), balance + 1);
+    assert_eq!(t.treasury_total(), 50_000);
+}
+
+/// A FIRST `record_call` refuses a zero or negative budget, because that is the
+/// value being frozen. Later calls still ignore the parameter completely - the
+/// validation must not become a back door that re-reads it.
+#[test]
+fn test_record_call_rejects_non_positive_budget_on_the_first_call_only() {
+    let t = TestSetup::new();
+    let client = t.client();
+    t.env.mock_all_auths();
+
+    let id = client.register_endpoint(&t.seller, &1_000);
+
+    for bad in [0_i128, -1, -10_000] {
+        assert_eq!(
+            client.try_record_call(&t.operator, &t.agent, &id, &bad),
+            Err(Ok(Error::InvalidAmount.into())),
+            "first record_call with budget {} must be refused",
+            bad
+        );
+        assert_eq!(t.budget_entry(&t.agent, id), None);
+    }
+
+    // A real first call freezes a real budget: 4_000 at 1_000 a call is room
+    // for exactly the four calls this test makes.
+    client.record_call(&t.operator, &t.agent, &id, &4_000);
+
+    // From here the parameter is ignored, INCLUDING these values: §1.3 lets the
+    // gateway drop the X-Agent-Budget header after the first call, so a later
+    // call may legitimately carry 0. Refusing it here would break the proxy on
+    // its second request.
+    for ignored in [0_i128, -1, 999_999] {
+        client.record_call(&t.operator, &t.agent, &id, &ignored);
+    }
+    assert_eq!(
+        t.budget_entry(&t.agent, id),
+        Some(BudgetEntry {
+            allocated: 4_000,
+            spent: 4_000,
+        })
+    );
+    // 999_999 was ignored like the rest: the ceiling is still 4_000.
+    assert_eq!(
+        client.try_record_call(&t.operator, &t.agent, &id, &999_999),
+        Err(Ok(Error::SpendingLimitExceeded.into()))
+    );
 }
