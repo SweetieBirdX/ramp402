@@ -8,6 +8,8 @@ import { createRepo } from "./repo.js";
 import { caip2Network, createPaymentGate } from "./payments.js";
 import { createProxyLedger } from "./proxyLedger.js";
 import { getStellar, scv } from "./stellar.js";
+import { payoutConfigFromEnv } from "./anchor/payout.js";
+import { createWithdrawalJobs } from "./withdrawalJob.js";
 import { Keypair } from "@stellar/stellar-sdk";
 
 // Everything is built at startup, so a missing env var fails here and not on the first request.
@@ -22,6 +24,21 @@ if (!facilitatorUrl || !poolSecret) {
 }
 // Agents pay the platform pool (§1.2: the contract holds no tokens). Only the public key is kept.
 const poolAddress = Keypair.fromSecret(poolSecret).publicKey();
+
+const anchorHomeDomain = process.env.ANCHOR_HOME_DOMAIN?.trim();
+if (!anchorHomeDomain) {
+  throw new Error("Missing required environment variable(s): ANCHOR_HOME_DOMAIN");
+}
+
+// The off-ramp. Built here so a bad PLATFORM_POOL_SECRET_KEY fails at startup rather than on the
+// first withdrawal, which would be minutes after the seller thought it had worked.
+const withdrawalJobs = createWithdrawalJobs({
+  repo,
+  payout: payoutConfigFromEnv(),
+  networkPassphrase: stellar.networkPassphrase,
+  defaultAnchorDomain: anchorHomeDomain,
+  preferredCurrency: process.env.ANCHOR_PAYOUT_CURRENCY?.trim() || "TRY",
+});
 
 const app = createApp({
   repo,
@@ -38,7 +55,22 @@ const app = createApp({
     friendbotUrl: FRIENDBOT_URLS[stellar.networkPassphrase],
     log: (line) => console.log(line),
   }),
+  startAnchorFlow: (row) => withdrawalJobs.start(row),
+  anchorHomeDomain,
 });
 
 const port = Number(process.env.PORT) || 3001;
-app.listen(port, () => console.log(`ramp402 gateway listening on :${port}`));
+app.listen(port, async () => {
+  console.log(`ramp402 gateway listening on :${port}`);
+  console.log(`anchor: ${anchorHomeDomain}`);
+
+  // A restart must not strand a withdrawal in `pending` for ever: pick up anything that already
+  // reached the anchor and keep polling it.
+  try {
+    const { resumed, stranded } = await withdrawalJobs.resumeInterrupted();
+    if (resumed) console.log(`resumed ${resumed} interrupted withdrawal(s)`);
+    if (stranded.length) console.warn(`${stranded.length} withdrawal(s) need a human: ${stranded.join(", ")}`);
+  } catch (err) {
+    console.error("could not resume interrupted withdrawals:", err);
+  }
+});

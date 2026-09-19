@@ -9,11 +9,17 @@ import { createProxyHandler, type ProxyDeps } from "./proxyRoute.js";
 import { createReadRoutes, requireSeller, type ReadRouteDeps } from "./readRoutes.js";
 import * as schemas from "./schemas.js";
 import type { HealthResponse } from "./types.js";
+import { createWithdrawRoutes, type WithdrawRouteDeps } from "./withdrawRoutes.js";
 
 dotenv.config({ quiet: true });
 
 /** Everything the routes talk to. index.ts wires the real ones; tests pass fakes. */
-export interface AppDeps extends BootstrapDeps, ReadRouteDeps, EndpointRouteDeps, ProxyDeps {
+export interface AppDeps
+  extends BootstrapDeps,
+    ReadRouteDeps,
+    EndpointRouteDeps,
+    ProxyDeps,
+    WithdrawRouteDeps {
   /** Seller auth (createAuthMiddleware): 401 or sets req.privyUserId / req.seller. */
   authenticate: RequestHandler;
 }
@@ -33,9 +39,9 @@ const requestLogger: RequestHandler = (req, res, next) => {
   next();
 };
 
-function notImplemented(route: string): never {
-  throw new HttpError(501, "not_implemented", route);
-}
+// The `notImplemented` helper lived here while §1.3's withdrawal routes were stubs. Every route in
+// §1.3 is implemented now, so nothing emits 501 and the helper is gone. `not_implemented` stays in
+// the ErrorCode union for the next stub that needs it.
 
 export function createApp(deps: AppDeps, options: AppOptions = {}): express.Express {
   const app = express();
@@ -58,22 +64,12 @@ export function createApp(deps: AppDeps, options: AppOptions = {}): express.Expr
   app.post("/api/endpoints/submit", deps.authenticate, requireSeller, endpoints.submit);
 
   // --- Withdrawal (two-step, then poll) -----------------------------------------------------
-  // Seller routes: authenticated like the rest even while stubbed, so no client ever learns to
-  // call them without a token.
-  app.post("/api/withdraw/prepare", deps.authenticate, requireSeller, (req) => {
-    validate(schemas.prepareWithdrawRequest, req.body ?? {}, "body");
-    notImplemented("POST /api/withdraw/prepare");
-  });
-
-  app.post("/api/withdraw/submit", deps.authenticate, requireSeller, (req) => {
-    validate(schemas.submitWithdrawRequest, req.body, "body");
-    notImplemented("POST /api/withdraw/submit");
-  });
-
-  app.get("/api/withdrawals/:id", deps.authenticate, requireSeller, (req) => {
-    validate(schemas.getWithdrawalParams, req.params, "params");
-    notImplemented("GET /api/withdrawals/:id");
-  });
+  // /submit answers as soon as the chain entry is made; the SEP-10/38/12/6 flow and the payment
+  // run in the background, which is what GET /api/withdrawals/:id is for.
+  const withdraw = createWithdrawRoutes(deps);
+  app.post("/api/withdraw/prepare", deps.authenticate, requireSeller, withdraw.prepare);
+  app.post("/api/withdraw/submit", deps.authenticate, requireSeller, withdraw.submit);
+  app.get("/api/withdrawals/:id", deps.authenticate, requireSeller, withdraw.get);
 
   // --- Read endpoints -----------------------------------------------------------------------
   const read = createReadRoutes(deps);

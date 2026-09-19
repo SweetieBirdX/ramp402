@@ -306,6 +306,8 @@ CREATE TABLE IF NOT EXISTS withdrawals (
   external_transaction_id TEXT,    -- the id on the external rail, e.g. the bank reference
   claimable_balance_id TEXT,       -- set when a missing trustline produced a claimable balance
   error_message TEXT,              -- why it failed, when status is 'failed'
+  anchor_domain TEXT,              -- which anchor served it; a restarted poll has to know
+  quote_buy_amount TEXT,           -- the SEP-38 buy amount, e.g. "485.41" TRY, as the anchor wrote it
   status TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

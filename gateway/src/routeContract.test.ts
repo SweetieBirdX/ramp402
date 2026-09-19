@@ -227,14 +227,27 @@ describe("every §1.3 route is registered", () => {
     expect(res.body).toEqual({ ok: true });
   });
 
-  it.each([
-    ["POST /api/withdraw/prepare", "post", "/api/withdraw/prepare", undefined],
-    ["POST /api/withdraw/submit", "post", "/api/withdraw/submit", { draft_id: "draft-1", signed_xdr: VALID_XDR }],
-    ["GET /api/withdrawals/:id", "get", "/api/withdrawals/w123", undefined],
-  ] as const)("%s is a validated, authenticated stub: 501 not_implemented until the withdrawal flow lands", async (name, method, path, body) => {
-    const res = await send({ method, path, body }, { authorization: gw.bearer() });
-    expect(res.status).toBe(501);
-    expect(res.body).toEqual({ error: "not_implemented", message: name });
+  it("POST /api/withdraw/prepare builds an unsigned transaction for a sufficient balance", async () => {
+    gw.behaviour.readBalance = async () => 50_000_000n; // 5 USDC
+    const res = await send({ method: "post", path: "/api/withdraw/prepare" }, { authorization: gw.bearer() });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ unsigned_xdr: expect.any(String), draft_id: expect.any(String) });
+  });
+
+  it("POST /api/withdraw/submit refuses a draft that was never issued", async () => {
+    const res = await send(
+      { method: "post", path: "/api/withdraw/submit", body: { draft_id: "draft-1", signed_xdr: VALID_XDR } },
+      { authorization: gw.bearer() },
+    );
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "not_found", message: expect.any(String) });
+  });
+
+  it("GET /api/withdrawals/:id is a 404 in the §1.1 shape for an unknown id", async () => {
+    const res = await send({ method: "get", path: "/api/withdrawals/w123" }, { authorization: gw.bearer() });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "not_found", message: expect.any(String) });
   });
 
   it("an unknown route is a JSON 404 in the §1.1 shape", async () => {
@@ -333,16 +346,119 @@ describe("cross-seller isolation", () => {
     expect(res.body).toEqual({ balance_stroops: 4_000_000 });
   });
 
-  // The withdrawal routes are still 501 stubs (the flow is blocked on open CONVENTIONS questions).
-  // These are the tests that must exist before it ships; they are listed here so the gap is visible.
-  it.todo("GET /api/withdrawals/:id: another seller's withdrawal is refused and nothing about it leaks");
-  it.todo("POST /api/withdraw/submit: another seller's draft_id is refused (reported as not found)");
+  it("GET /api/withdrawals/:id: another seller's withdrawal is refused and nothing about it leaks", async () => {
+    const theirs = gw.repo.createWithdrawal({
+      seller_id: gw.sellerB.id,
+      amount_stroops: 50_000_000,
+      anchor_domain: "anchor.test",
+    });
+    gw.repo.updateWithdrawalProgress(theirs.id, "pending", {
+      anchor_status: "pending_external",
+      anchor_tx_id: "b-secret-anchor-tx",
+      external_transaction_id: "b-secret-bank-ref",
+    });
+
+    const res = await send({ method: "get", path: `/api/withdrawals/${theirs.id}` }, { authorization: gw.bearer("did:privy:A") });
+
+    // Indistinguishable from an id that never existed: 404, not 403 — a different status would
+    // itself confirm the withdrawal is real.
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "not_found", message: expect.any(String) });
+    expect(JSON.stringify(res.body)).not.toContain("b-secret-anchor-tx");
+    expect(JSON.stringify(res.body)).not.toContain("b-secret-bank-ref");
+  });
+
+  it("POST /api/withdraw/submit: another seller's draft_id is refused (reported as not found)", async () => {
+    gw.behaviour.readBalance = async () => 50_000_000n;
+    const prepared = await send({ method: "post", path: "/api/withdraw/prepare" }, { authorization: gw.bearer("did:privy:B") });
+    expect(prepared.status).toBe(200);
+
+    const res = await send(
+      { method: "post", path: "/api/withdraw/submit", body: { draft_id: prepared.body.draft_id, signed_xdr: prepared.body.unsigned_xdr } },
+      { authorization: gw.bearer("did:privy:A") },
+    );
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "not_found", message: expect.any(String) });
+    // Nothing was submitted and no anchor flow was started on B's behalf.
+    expect(gw.ledger.submitted).toHaveLength(0);
+    expect(gw.startedAnchorFlows).toHaveLength(0);
+  });
 });
 
 describe("withdrawal minimum (§1.5: 1 USDC is a lower bound, not a cap)", () => {
-  it.todo("POST /api/withdraw/prepare rejects a balance below 10_000_000 stroops with a clear message");
-  it.todo("a balance of exactly 10_000_000 stroops is accepted");
-  it.todo("a balance above 1 USDC is withdrawn in full — never clamped to 1 USDC");
+  const prepare = () => request(gw.app).post("/api/withdraw/prepare").set("Authorization", gw.bearer()).send();
+
+  it.each([
+    ["nothing at all", 0n],
+    ["one stroop", 1n],
+    ["0.4 USDC", 4_000_000n],
+    ["a stroop under the minimum", 9_999_999n],
+  ])("rejects %s, and builds nothing", async (_label, balance) => {
+    gw.behaviour.readBalance = async () => balance;
+    const res = await prepare();
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid_request");
+    // A seller has to be able to act on this, so it must name the minimum.
+    if (balance > 0n) expect(res.body.message).toMatch(/1 USDC|minimum/i);
+    expect(res.body.unsigned_xdr).toBeUndefined();
+    expect(gw.ledger.built).toHaveLength(0);
+  });
+
+  it("accepts a balance of exactly 10_000_000 stroops — the boundary is inclusive", async () => {
+    gw.behaviour.readBalance = async () => 10_000_000n;
+    const res = await prepare();
+
+    expect(res.status).toBe(200);
+    expect(res.body.unsigned_xdr).toEqual(expect.any(String));
+  });
+
+  it("withdraws a larger balance IN FULL — never clamped to the 1 USDC minimum", async () => {
+    // The failure this guards: treating the lower bound as a cap and paying out 1 USDC of 25.
+    const balance = 250_000_000n; // 25 USDC
+    gw.behaviour.readBalance = async () => balance;
+
+    const prepared = await prepare();
+    expect(prepared.status).toBe(200);
+
+    // withdraw() zeroes the whole balance and returns it; that return value is the figure that
+    // reaches the row. The unsigned XDR round-trips as the signed one: a signature does not change
+    // the transaction hash the draft is matched on.
+    gw.ledger.nextResult = () => ({ txHash: "a".repeat(64), returnValue: balance });
+    const submitted = await request(gw.app)
+      .post("/api/withdraw/submit")
+      .set("Authorization", gw.bearer())
+      .send({ draft_id: prepared.body.draft_id, signed_xdr: prepared.body.unsigned_xdr });
+
+    expect(submitted.status).toBe(200);
+    expect(submitted.body).toEqual({ withdrawal_id: expect.any(String), status: "pending" });
+
+    const row = gw.repo.findWithdrawal(submitted.body.withdrawal_id);
+    expect(row?.amount_stroops).toBe(Number(balance));
+    expect(row?.amount_stroops).not.toBe(10_000_000);
+
+    // And the anchor flow was handed the full amount, not a clamped one.
+    expect(gw.startedAnchorFlows).toHaveLength(1);
+    expect(gw.startedAnchorFlows[0]?.amount_stroops).toBe(Number(balance));
+  });
+
+  it("records nothing when the contract says the balance was already taken", async () => {
+    gw.behaviour.readBalance = async () => 50_000_000n;
+    const prepared = await prepare();
+
+    // withdraw() returns 0 rather than failing (§1.2) when there is nothing left.
+    gw.ledger.nextResult = () => ({ txHash: "b".repeat(64), returnValue: 0n });
+    const submitted = await request(gw.app)
+      .post("/api/withdraw/submit")
+      .set("Authorization", gw.bearer())
+      .send({ draft_id: prepared.body.draft_id, signed_xdr: prepared.body.unsigned_xdr });
+
+    expect(submitted.status).toBe(409);
+    expect(submitted.body.error).toBe("invalid_request");
+    // No row, and above all no payout: the anchor must not be asked to send money that did not move.
+    expect(gw.startedAnchorFlows).toHaveLength(0);
+  });
 });
 
 describe("every error response has the §1.1 shape and a §1.1 machine code", () => {
@@ -382,7 +498,8 @@ describe("every error response has the §1.1 shape and a §1.1 machine code", ()
         return request(g.app).post("/api/endpoints/prepare").set("Authorization", g.bearer()).send({ upstream_url: "https://api.test/x", price_stroops: 1_000 });
       },
     },
-    { produces: "not_implemented", status: 501, run: (g) => request(g.app).post("/api/withdraw/prepare").set("Authorization", g.bearer()) },
+    // `not_implemented` has no producer left: every route in §1.3 is implemented. The code stays in
+    // the ErrorCode union for the next stub, but nothing in the gateway can emit it today.
     {
       produces: "upstream_failed",
       status: 502,

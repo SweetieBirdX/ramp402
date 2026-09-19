@@ -133,8 +133,20 @@ export interface GetWithdrawalParams {
 }
 
 export interface GetWithdrawalResponse {
-  status: WithdrawalStatus | Sep6Status;
-  anchor_status?: Sep6Status;
+  /**
+   * OUR lifecycle, and only ever these three (§1.1). The anchor's own SEP-6 status is a separate
+   * vocabulary and arrives in `anchor_status` — a withdrawal waiting on a trustline is `pending`
+   * here and `pending_trust` there.
+   */
+  status: WithdrawalStatus;
+  /**
+   * The anchor's SEP-6 status, passed through verbatim. `Sep6Status` covers what our anchors send
+   * today, but §1.3 calls this a passthrough string: render an unrecognised value as generic
+   * progress rather than letting it fall through every branch.
+   */
+  anchor_status?: Sep6Status | (string & {});
+  /** What the anchor's locked SEP-38 quote pays out, e.g. "485.41". Absent until it has quoted. */
+  quote_buy_amount?: string;
   anchor_tx_id?: string;
   external_transaction_id?: string;
   amount_stroops?: number;

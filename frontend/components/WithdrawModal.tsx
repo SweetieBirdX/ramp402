@@ -273,7 +273,14 @@ type ModalFlowState =
 
 // 1 USDC in stroops (CONVENTIONS.md §1.5)
 const MIN_WITHDRAW_STROOPS = BigInt(10_000_000);
-const ESTIMATED_TRY_RATE = 34.50; // Demo anchor exchange rate
+
+/**
+ * Shown before the anchor has quoted, and only then. §1.5 forbids hardcoding anything the anchor
+ * can tell us, so the moment `quote_buy_amount` arrives from GET /api/withdrawals/:id this is
+ * discarded and the anchor's locked rate is displayed instead — that is the figure the seller is
+ * actually paid, and it is what the receipt must show.
+ */
+const INDICATIVE_TRY_RATE = 48.5;
 
 function generateDraftId(): string {
   return `draft_withdraw_${Date.now()}`;
@@ -329,7 +336,15 @@ export default function WithdrawModal({
   const stroopsBigInt = BigInt(balanceStroops);
   const isBelowMinimum = stroopsBigInt < MIN_WITHDRAW_STROOPS;
   const usdcAmountDisplay = stroopsToDisplay(balanceStroops);
-  const tryAmountDisplay = (parseFloat(usdcAmountDisplay) * ESTIMATED_TRY_RATE).toFixed(2);
+
+  /**
+   * What the anchor's SEP-38 quote actually pays out, once it has quoted. Until then an indicative
+   * figure, clearly the estimate rather than the promise.
+   */
+  const [quotedTry, setQuotedTry] = useState<string | null>(null);
+  const tryAmountDisplay =
+    quotedTry ?? (parseFloat(usdcAmountDisplay) * INDICATIVE_TRY_RATE).toFixed(2);
+  const rateIsLocked = quotedTry !== null;
 
   // Cleanup polling on unmount
   useEffect(() => {
@@ -508,6 +523,10 @@ export default function WithdrawModal({
         const pollRes: GetWithdrawalResponse = await getWithdrawal(wid);
         const resolvedStatus = (pollRes.anchor_status || pollRes.status) as Sep6Status;
 
+        // The anchor's locked rate replaces the indicative one as soon as it exists (§1.5).
+        if (pollRes.quote_buy_amount) {
+          setQuotedTry(pollRes.quote_buy_amount);
+        }
         if (pollRes.external_transaction_id) {
           setExternalTxId(pollRes.external_transaction_id);
         }
@@ -799,12 +818,16 @@ export default function WithdrawModal({
                   </p>
                 </div>
                 <div className="border-l border-emerald-200 pl-4">
-                  <p className="text-xs text-emerald-700 font-medium">Estimated Fiat Payout</p>
+                  <p className="text-xs text-emerald-700 font-medium">
+                    {rateIsLocked ? "Fiat Payout (rate locked)" : "Estimated Fiat Payout"}
+                  </p>
                   <p className="text-2xl font-extrabold tracking-tight mt-0.5 text-emerald-900">
                     ₺{tryAmountDisplay} TRY
                   </p>
                   <p className="text-[11px] text-emerald-600 mt-0.5">
-                    1 USDC ≈ {ESTIMATED_TRY_RATE.toFixed(2)} TRY (SEP-38)
+                    {rateIsLocked
+                      ? "Rate locked by the anchor's SEP-38 quote"
+                      : `1 USDC ≈ ${INDICATIVE_TRY_RATE.toFixed(2)} TRY — indicative until the anchor quotes`}
                   </p>
                 </div>
               </div>

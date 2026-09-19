@@ -113,9 +113,19 @@ export interface GetWithdrawalParams {
 }
 
 export interface GetWithdrawalResponse {
+  /** OUR lifecycle (§1.1). Never carries a SEP-6 name — that goes in anchor_status. */
   status: WithdrawalStatus;
+  /** The anchor's own SEP-6 status, passed through verbatim. Not an enum of ours. */
+  anchor_status?: string;
   anchor_tx_id?: string;
   external_transaction_id?: string;
+  /** Present when a missing trustline produced a claimable balance, so the UI can offer a claim. */
+  claimable_balance_id?: string;
+  amount_stroops?: number;
+  /** What the anchor's locked SEP-38 quote pays out, e.g. "485.41" TRY. */
+  quote_buy_amount?: string;
+  /** Human text when status is "failed". */
+  error_message?: string;
 }
 
 // ---------------------------------------------------------------------------------------------

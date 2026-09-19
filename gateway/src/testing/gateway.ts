@@ -12,7 +12,7 @@ import { openDatabase, type DbHandle } from "../db.js";
 import { createDraftStore } from "../drafts.js";
 import { createFunder } from "../funding.js";
 import { createProxyLedger } from "../proxyLedger.js";
-import { createRepo, type Repo, type SellerRow } from "../repo.js";
+import { createRepo, type Repo, type SellerRow, type WithdrawalRow } from "../repo.js";
 import { fakeLedger } from "./ledger.js";
 import { privyTestKeys, privyToken, TEST_PRIVY_APP_ID } from "./privy.js";
 import { fakeContract, fakeGate } from "./proxy.js";
@@ -50,6 +50,13 @@ export function createTestGateway() {
     readBalance: async (address: string): Promise<bigint> => (address === SELLER_A ? 4_000_000n : 9_000_000n),
   };
 
+  /**
+   * Withdrawals whose anchor flow was started. The real job talks SEP-10/38/12/6 to a live anchor,
+   * so tests assert that it was handed the row and stop there — the flow itself is exercised by the
+   * integration tests and by scripts against tr-mock-anchor.
+   */
+  const startedAnchorFlows: WithdrawalRow[] = [];
+
   const app = createApp(
     {
       repo,
@@ -67,6 +74,8 @@ export function createTestGateway() {
       proxyLedger: createProxyLedger(contract.stellar, (l) => logs.push(l)),
       fetchUpstream: (() => behaviour.upstream()) as unknown as typeof fetch,
       upstreamTimeoutMs: 50,
+      startAnchorFlow: (row) => startedAnchorFlows.push(row),
+      anchorHomeDomain: "anchor.test",
       log: (l) => logs.push(l),
     },
     { log: false },
@@ -83,6 +92,7 @@ export function createTestGateway() {
     ledger,
     logs,
     behaviour,
+    startedAnchorFlows,
     /** `Authorization` header value for a Privy user (a bootstrapped seller unless `sub` says otherwise). */
     bearer: (sub = "did:privy:A", claims: Record<string, unknown> = {}) => `Bearer ${privyToken(keys.privateKey, { sub, ...claims })}`,
     /** Tokens that must all be refused with 401. */

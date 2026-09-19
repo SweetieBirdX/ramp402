@@ -43,11 +43,32 @@ function prepareStatements(db: Db) {
     ),
 
     insertWithdrawal: db.prepare(
-      "INSERT INTO withdrawals (id, seller_id, amount_stroops, anchor_tx_id, status) VALUES (?, ?, ?, ?, ?)",
+      `INSERT INTO withdrawals (id, seller_id, amount_stroops, anchor_tx_id, anchor_domain, status)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     ),
     withdrawalById: db.prepare("SELECT * FROM withdrawals WHERE id = ?"),
     updateWithdrawalStatus: db.prepare(
       "UPDATE withdrawals SET status = ?, anchor_tx_id = COALESCE(?, anchor_tx_id) WHERE id = ?",
+    ),
+    /**
+     * Every anchor-supplied field in one statement. COALESCE everywhere: the anchor reveals these
+     * at different stages — a quote before a transaction id, an external id only at the very end —
+     * and a later poll that does not mention a field must never erase what an earlier one set.
+     */
+    updateWithdrawalProgress: db.prepare(
+      `UPDATE withdrawals SET
+         status                  = ?,
+         anchor_status           = COALESCE(?, anchor_status),
+         anchor_tx_id            = COALESCE(?, anchor_tx_id),
+         external_transaction_id = COALESCE(?, external_transaction_id),
+         claimable_balance_id    = COALESCE(?, claimable_balance_id),
+         quote_buy_amount        = COALESCE(?, quote_buy_amount),
+         error_message           = COALESCE(?, error_message)
+       WHERE id = ?`,
+    ),
+    /** Rows a restarted gateway must pick back up. */
+    pendingWithdrawals: db.prepare(
+      "SELECT * FROM withdrawals WHERE status = 'pending' ORDER BY created_at",
     ),
   };
 }

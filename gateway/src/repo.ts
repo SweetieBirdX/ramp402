@@ -44,6 +44,13 @@ export interface WithdrawalRow {
   seller_id: string;
   amount_stroops: number;
   anchor_tx_id: string | null;
+  /** The anchor's SEP-6 status, verbatim. Not one of ours — see §1.1. */
+  anchor_status: string | null;
+  external_transaction_id: string | null;
+  claimable_balance_id: string | null;
+  error_message: string | null;
+  anchor_domain: string | null;
+  quote_buy_amount: string | null;
   status: WithdrawalStatus;
   created_at: string;
 }
@@ -165,6 +172,7 @@ export function createRepo({ db, stmts }: DbHandle) {
       amount_stroops: number;
       status?: WithdrawalStatus;
       anchor_tx_id?: string | null;
+      anchor_domain?: string | null;
     }): WithdrawalRow {
       assertStroops("amount_stroops", input.amount_stroops);
       const id = nanoid();
@@ -173,6 +181,7 @@ export function createRepo({ db, stmts }: DbHandle) {
         input.seller_id,
         input.amount_stroops,
         input.anchor_tx_id ?? null,
+        input.anchor_domain ?? null,
         input.status ?? "pending",
       );
       return stmts.withdrawalById.get(id) as WithdrawalRow;
@@ -188,8 +197,45 @@ export function createRepo({ db, stmts }: DbHandle) {
       return changes === 0 ? undefined : (stmts.withdrawalById.get(id) as WithdrawalRow);
     },
 
+    /**
+     * Record whatever the anchor has revealed so far.
+     *
+     * Every field except `status` is COALESCEd, because the anchor hands them over at different
+     * stages and a later poll that omits one must not erase it. `status` is ours (§1.1) and is
+     * always written; the anchor's own word goes in `anchor_status` untouched.
+     */
+    updateWithdrawalProgress(
+      id: string,
+      status: WithdrawalStatus,
+      fields: {
+        anchor_status?: string | null;
+        anchor_tx_id?: string | null;
+        external_transaction_id?: string | null;
+        claimable_balance_id?: string | null;
+        quote_buy_amount?: string | null;
+        error_message?: string | null;
+      } = {},
+    ): WithdrawalRow | undefined {
+      const { changes } = stmts.updateWithdrawalProgress.run(
+        status,
+        fields.anchor_status ?? null,
+        fields.anchor_tx_id ?? null,
+        fields.external_transaction_id ?? null,
+        fields.claimable_balance_id ?? null,
+        fields.quote_buy_amount ?? null,
+        fields.error_message ?? null,
+        id,
+      );
+      return changes === 0 ? undefined : (stmts.withdrawalById.get(id) as WithdrawalRow);
+    },
+
     findWithdrawal(id: string): WithdrawalRow | undefined {
       return stmts.withdrawalById.get(id) as WithdrawalRow | undefined;
+    },
+
+    /** Withdrawals a restarted gateway must resume; without this they sit in `pending` for ever. */
+    listPendingWithdrawals(): WithdrawalRow[] {
+      return stmts.pendingWithdrawals.all() as WithdrawalRow[];
     },
   };
 }
