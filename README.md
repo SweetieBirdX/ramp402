@@ -20,7 +20,42 @@ _TBD._
 
 ## Contract
 
-_TBD._
+> **STUB DEPLOYMENT — will be replaced once the real logic lands.**
+> Every function is currently `todo!()`, so invoking one traps with
+> `UnreachableCodeReached`. This ID exists so the gateway and frontend can be wired
+> up now; it **will change** when the real contract is deployed. If Soroban calls
+> start failing for no clear reason, check this value first.
+
+| | |
+| --- | --- |
+| Network | testnet (`Test SDF Network ; September 2015`) |
+| Contract ID | `CBD5OXK7ZSX2HMMIL53CCFXP7KLJFGM2G3IDBQXA5VN6OJ23DBQ4RUNC` |
+| Deployer (public) | `GCYLZISOHDHY3E2NCZU2F72Y6SJAT5CN3ZUVSMHPYA76H7SUDP264335` |
+| soroban-sdk | 23.5.3 |
+| Stellar CLI | 25.2.0 |
+
+Build and deploy:
+
+```bash
+cd contract
+cargo build --locked --target wasm32-unknown-unknown --release
+stellar contract deploy \
+  --wasm target/wasm32-unknown-unknown/release/ramp_ledger.wasm \
+  --source-account ramp402-deployer \
+  --network testnet \
+  --alias ramp_ledger_stub
+```
+
+Confirm a deployment is live — this reads the spec back off the network, so it
+proves the contract is addressable without needing any function to work:
+
+```bash
+stellar contract info interface --id <CONTRACT_ID> --network testnet
+```
+
+`contract/Cargo.lock` is committed on purpose: it pins `ed25519-dalek` to 2.2.0
+around a `soroban-env-host` 23.0.1 resolution break that otherwise stops
+`cargo test` compiling on a fresh clone. Build with `--locked`.
 
 ## Gateway
 
