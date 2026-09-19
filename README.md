@@ -247,12 +247,140 @@ clone. Build with `--locked`.
 
 ## Gateway
 
-_TBD._
+Node/TypeScript. Three jobs: the x402 proxy agents pay through, the REST API the dashboard reads,
+and the SEP anchor off-ramp that turns USDC into Turkish Lira.
+
+```bash
+cd gateway
+npm install
+cp .env.example .env       # then fill it in — see the table below
+npm run dev                # http://localhost:3001
+```
+
+### Routes
+
+Exactly the ones in [CONVENTIONS.md §1.3](docs/CONVENTIONS.md). Seller routes take
+`Authorization: Bearer <privy_access_token>`; the proxy takes none, because an autonomous agent has
+no login.
+
+| Route | What it does |
+| --- | --- |
+| `POST /api/sellers/bootstrap` | First login: creates the seller row and funds the address via Friendbot. Idempotent. |
+| `POST /api/endpoints/prepare` → `/submit` | Two-step registration. The gateway builds an unsigned XDR, Privy signs it in the browser, the gateway submits it and reads the `endpoint_id` **from the contract's return value**. |
+| `GET /proxy/:proxy_slug` | The product. 402 → the agent pays → 200. Budget frozen on the pair's first call. |
+| `GET /api/endpoints`, `/api/calls`, `/api/balance` | Dashboard reads. `/api/balance` reads the chain, never the `calls` table. |
+| `POST /api/withdraw/prepare` → `/submit`, `GET /api/withdrawals/:id` | Two-step withdrawal, then poll. `/submit` answers immediately and the anchor flow runs in the background. |
+| `GET /health` | `{ ok: true }` |
+
+### Environment
+
+| Variable | Notes |
+| --- | --- |
+| `CONTRACT_ID` | The deployed `ramp_ledger` — see `## Contract`. |
+| `OPERATOR_SECRET_KEY` | Must be the key baked into that contract, or every paid call fails with `NotOperator`. `scripts/preflight.ts` checks this. |
+| `PLATFORM_POOL_SECRET_KEY` | Holds the USDC. Agents pay into it; the anchor is paid from it. |
+| `ANCHOR_HOME_DOMAIN` | `tr-mock-anchor.fly.dev` for the TRY demo. Every anchor URL and the USDC issuer are read from its `stellar.toml` — nothing is hardcoded (§1.5). |
+| `PRIVY_APP_ID`, `PRIVY_APP_SECRET` | Seller authentication. |
+| `X402_FACILITATOR_URL` | Verifies and settles agent payments. Stellar is x402 **v2** only. |
+| `UPSTREAM_CRED_ENCRYPTION_KEY` | 64 hex characters. Encrypts sellers' upstream API keys at rest. |
+| `TREASURY_ADDRESS`, `DB_PATH`, `PORT`, `STELLAR_RPC_URL`, `STELLAR_NETWORK` | |
+
+### Tests
+
+```bash
+npm test                # 277 tests, offline, no network and never ramp402.db
+npm run test:integration  # the deployed contract, the anchor and the facilitator, for real
+```
+
+The integration lane includes a **real withdrawal**: it moves 1 USDC out of the platform pool,
+through SEP-10/38/12/6, and asserts the anchor reports `completed` with an
+`external_transaction_id`. It skips itself when the environment is not configured.
 
 ## Frontend
 
-_TBD._
+Next.js. The seller dashboard and the agent console that drives the live demo.
+
+```bash
+cd frontend
+npm install
+cp .env.local.example .env.local    # NEXT_PUBLIC_GATEWAY_URL, NEXT_PUBLIC_PRIVY_APP_ID
+npm run dev                         # http://localhost:3000
+npm run check                       # typecheck, lint and a production build
+```
+
+| Page | What it is |
+| --- | --- |
+| `/` | Landing. |
+| `/dashboard` | The seller: register an endpoint, watch calls arrive, see the balance the chain reports, withdraw to TRY. |
+| `/agent-console` | A real x402 client. Funds a throwaway agent, pays per call, and shows the budget being spent and then refused. |
+
+**Signing.** Privy holds the seller's Stellar key and signs raw 32-byte hashes
+(`signRawHash` on `tx.hash()`), which spike S3 verified covers SEP-10 challenges, classic payments
+and Soroban `invoke_host_function` alike. The client wraps the signature in an
+`xdr.DecoratedSignature`. No external wallet is needed.
 
 ## Demo
 
-_TBD._
+Five minutes, in this order. Run the preflight first — it catches every failure we have actually
+hit, in about three seconds.
+
+```bash
+npx tsx scripts/preflight.ts        # expect 8/8 PASS
+npx tsx scripts/reset-demo.ts       # clean dashboard: no calls, no withdrawals
+cd gateway && npm run dev           # :3001
+cd frontend && npm run dev          # :3000
+```
+
+**1. The seller registers an API.** On `/dashboard`, log in with Privy — the account is created and
+funded by Friendbot behind the scenes, so there is nothing to explain about faucets. Register an
+endpoint with a price. The `endpoint_id` in the table came back from the contract, not from a
+counter in our database.
+
+**2. An agent pays per call.** On `/agent-console`, call the endpoint. The first request returns
+**402** with the payment requirements; the client signs a payment and retries; the second returns
+**200** with the upstream's data. The call appears on the dashboard with its transaction hash.
+
+**3. The budget holds.** The agent's budget was frozen on its first call. Keep calling: the fourth
+is refused with **403 budget_exceeded** — and it stays refused even if the client asks for a larger
+budget, because the parameter is never read again. That is a security property with a contract test
+guarding it.
+
+**4. The seller withdraws to Turkish Lira.** Click **TL'ye Çek**. The gateway zeroes the on-chain
+balance, then runs SEP-10 → SEP-38 → SEP-12 → SEP-6 in the background and pays the anchor with a
+classic payment carrying its `id` memo. The dashboard polls and shows the anchor's own status until
+it reads `completed`, with the bank reference the anchor returned.
+
+If anything looks wrong mid-demo, the answer is almost always in `npx tsx scripts/preflight.ts`.
+
+## Architecture
+
+```
+  agent ──402/pay──►  gateway /proxy/:slug  ──record_call──►  ramp_ledger (Soroban)
+                           │                                        │
+                           ├── forwards to the seller's upstream    ├── budget frozen per
+                           │                                        │   (agent, endpoint)
+                           └── settle 1% / 99% ────────────────────►┘
+                                                                    │
+  seller ──Privy sign──►  gateway /api/withdraw  ──withdraw()───────►┘
+                           │
+                           └── SEP-10/38/12/6 ──►  anchor  ──►  TRY to a bank account
+                                   USDC paid from the platform pool, memo_type id
+```
+
+The contract is a **ledger**: it records who spent what and who is owed what, and never holds or
+transfers a token. USDC moves off chain from the platform pool. That is a deliberate decision, not
+an oversight — the contract custodies nothing, so there is nothing in it to steal, and no token
+transfer can fail halfway through a settlement.
+
+Full reasoning in [docs/TECHNICAL.md](docs/TECHNICAL.md); the interfaces all three components build
+against are in [docs/CONVENTIONS.md](docs/CONVENTIONS.md).
+
+## Team
+
+Built for the Stellar Pro Hackathon, Genesis Track, 19–20 September 2026.
+
+| | |
+| --- | --- |
+| Efe | `contract/` — the `ramp_ledger` Soroban contract, deployment and the verification scripts |
+| Ömer | `gateway/` — the x402 proxy, the REST API and the anchor off-ramp |
+| Mert | `frontend/` — the seller dashboard and the agent console |
