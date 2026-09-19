@@ -1,12 +1,20 @@
 // Builds the Express app without listening, so tests can mount it without opening a port.
-// Routes are exactly those in docs/CONVENTIONS.md §1.3; each is a validated stub until implemented.
+// Routes are exactly those in docs/CONVENTIONS.md §1.3; the unimplemented ones are validated stubs.
 import dotenv from "dotenv";
 import express, { type RequestHandler } from "express";
+import { createBootstrapHandler, type BootstrapDeps } from "./bootstrap.js";
 import { errorHandler, HttpError, notFoundHandler, validate } from "./errors.js";
+import { createReadRoutes, requireSeller, type ReadRouteDeps } from "./readRoutes.js";
 import * as schemas from "./schemas.js";
 import { AGENT_BUDGET_HEADER, type HealthResponse } from "./types.js";
 
 dotenv.config({ quiet: true });
+
+/** Everything the routes talk to. index.ts wires the real ones; tests pass fakes. */
+export interface AppDeps extends BootstrapDeps, ReadRouteDeps {
+  /** Seller auth (createAuthMiddleware): 401 or sets req.privyUserId / req.seller. */
+  authenticate: RequestHandler;
+}
 
 export interface AppOptions {
   /** Log one line per request. Defaults to on; tests turn it off. */
@@ -27,7 +35,7 @@ function notImplemented(route: string): never {
   throw new HttpError(501, "not_implemented", route);
 }
 
-export function createApp(options: AppOptions = {}): express.Express {
+export function createApp(deps: AppDeps, options: AppOptions = {}): express.Express {
   const app = express();
   app.disable("x-powered-by");
 
@@ -40,10 +48,7 @@ export function createApp(options: AppOptions = {}): express.Express {
   });
 
   // --- Seller onboarding -------------------------------------------------------------------
-  app.post("/api/sellers/bootstrap", (req) => {
-    validate(schemas.bootstrapSellerRequest, req.body ?? {}, "body");
-    notImplemented("POST /api/sellers/bootstrap");
-  });
+  app.post("/api/sellers/bootstrap", deps.authenticate, createBootstrapHandler(deps));
 
   // --- Endpoint registration (two-step) -----------------------------------------------------
   app.post("/api/endpoints/prepare", (req) => {
@@ -73,18 +78,10 @@ export function createApp(options: AppOptions = {}): express.Express {
   });
 
   // --- Read endpoints -----------------------------------------------------------------------
-  app.get("/api/endpoints", () => {
-    notImplemented("GET /api/endpoints");
-  });
-
-  app.get("/api/balance", () => {
-    notImplemented("GET /api/balance");
-  });
-
-  app.get("/api/calls", (req) => {
-    validate(schemas.listCallsQuery, req.query, "query");
-    notImplemented("GET /api/calls");
-  });
+  const read = createReadRoutes(deps);
+  app.get("/api/endpoints", deps.authenticate, requireSeller, read.listEndpoints);
+  app.get("/api/balance", deps.authenticate, requireSeller, read.getBalance);
+  app.get("/api/calls", deps.authenticate, requireSeller, read.listCalls);
 
   // --- Agent side (x402) --------------------------------------------------------------------
   app.get("/proxy/:proxy_slug", (req) => {

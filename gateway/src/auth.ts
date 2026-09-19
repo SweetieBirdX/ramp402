@@ -36,24 +36,48 @@ export interface PrivyVerifierOptions {
   jwtVerificationKey?: string;
 }
 
-export function createPrivyVerifier(options: PrivyVerifierOptions): TokenVerifier {
+/** Returns the G… address of the user's Privy embedded Stellar wallet, or null if none exists yet. */
+export type StellarWalletLookup = (privyUserId: string) => Promise<string | null>;
+
+export interface PrivyServices {
+  verifyToken: TokenVerifier;
+  findStellarWallet: StellarWalletLookup;
+}
+
+export function createPrivyServices(options: PrivyVerifierOptions): PrivyServices {
   const privy = new PrivyClient({
     appId: options.appId,
     appSecret: options.appSecret,
     jwtVerificationKey: options.jwtVerificationKey,
   });
   const auth = privy.utils().auth();
-  return async (accessToken) => (await auth.verifyAccessToken(accessToken)).user_id;
+
+  return {
+    verifyToken: async (accessToken) => (await auth.verifyAccessToken(accessToken)).user_id,
+
+    // Read from Privy, never from the request: the client cannot choose which address gets funded.
+    findStellarWallet: async (privyUserId) => {
+      const user = await privy.users()._get(privyUserId);
+      const wallet = user.linked_accounts.find(
+        (a) => a.type === "wallet" && "chain_type" in a && a.chain_type === "stellar" && a.connector_type === "embedded",
+      );
+      return wallet && "address" in wallet ? wallet.address : null;
+    },
+  };
 }
 
-/** Builds the verifier from PRIVY_APP_ID / PRIVY_APP_SECRET; fails fast if either is empty. */
-export function privyVerifierFromEnv(env: NodeJS.ProcessEnv = process.env): TokenVerifier {
+export function createPrivyVerifier(options: PrivyVerifierOptions): TokenVerifier {
+  return createPrivyServices(options).verifyToken;
+}
+
+/** Builds the Privy services from PRIVY_APP_ID / PRIVY_APP_SECRET; fails fast if either is empty. */
+export function privyServicesFromEnv(env: NodeJS.ProcessEnv = process.env): PrivyServices {
   const appId = env.PRIVY_APP_ID?.trim();
   const appSecret = env.PRIVY_APP_SECRET?.trim();
   if (!appId || !appSecret) {
     throw new Error("Missing required environment variable(s): PRIVY_APP_ID, PRIVY_APP_SECRET");
   }
-  return createPrivyVerifier({ appId, appSecret });
+  return createPrivyServices({ appId, appSecret });
 }
 
 const BEARER = /^Bearer ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/;

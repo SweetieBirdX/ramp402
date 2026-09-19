@@ -22,6 +22,10 @@ export interface EndpointRow {
   created_at: string;
 }
 
+export interface EndpointWithCallCountRow extends EndpointRow {
+  call_count: number;
+}
+
 export interface CallRow {
   id: string;
   endpoint_id: string;
@@ -60,12 +64,28 @@ function assertStroops(name: string, value: number): void {
   }
 }
 
-export function createRepo({ stmts }: DbHandle) {
+export function createRepo({ db, stmts }: DbHandle) {
+  function createSeller(input: { privy_user_id: string; stellar_address: string }): SellerRow {
+    const id = nanoid();
+    stmts.insertSeller.run(id, input.privy_user_id, input.stellar_address);
+    return stmts.sellerById.get(id) as SellerRow;
+  }
+
+  // sellers.privy_user_id is not UNIQUE in the schema, so "at most one row per Privy user" is enforced
+  // here: lookup and insert run in one synchronous transaction, which nothing can interleave with.
+  const findOrCreateSellerTx = db.transaction(
+    (input: { privy_user_id: string; stellar_address: string }): { seller: SellerRow; created: boolean } => {
+      const existing = stmts.sellerByPrivyId.get(input.privy_user_id) as SellerRow | undefined;
+      return existing ? { seller: existing, created: false } : { seller: createSeller(input), created: true };
+    },
+  );
+
   return {
-    createSeller(input: { privy_user_id: string; stellar_address: string }): SellerRow {
-      const id = nanoid();
-      stmts.insertSeller.run(id, input.privy_user_id, input.stellar_address);
-      return stmts.sellerById.get(id) as SellerRow;
+    createSeller,
+
+    /** Returns the Privy user's seller row, inserting it first if there is none. */
+    findOrCreateSeller(input: { privy_user_id: string; stellar_address: string }): { seller: SellerRow; created: boolean } {
+      return findOrCreateSellerTx(input);
     },
 
     findSellerByPrivyId(privyUserId: string): SellerRow | undefined {
@@ -88,6 +108,11 @@ export function createRepo({ stmts }: DbHandle) {
 
     listEndpointsBySeller(sellerId: string): EndpointRow[] {
       return stmts.endpointsBySeller.all(sellerId) as EndpointRow[];
+    },
+
+    /** The seller's endpoints, newest first, each with its total number of logged calls. */
+    listEndpointsWithCallCountBySeller(sellerId: string): EndpointWithCallCountRow[] {
+      return stmts.endpointsWithCallCountBySeller.all(sellerId) as EndpointWithCallCountRow[];
     },
 
     findEndpointBySlug(proxySlug: string): EndpointRow | undefined {
@@ -118,9 +143,10 @@ export function createRepo({ stmts }: DbHandle) {
       return stmts.callById.get(id) as CallRow;
     },
 
-    /** Newest first, as GET /api/calls requires. */
-    listCallsByEndpoint(endpointId: EndpointId): CallRow[] {
-      return stmts.callsByEndpoint.all(endpointIdToString(endpointId)) as CallRow[];
+    /** Newest first, as GET /api/calls requires; at most `limit` rows. */
+    listCallsByEndpoint(endpointId: EndpointId, limit = 100): CallRow[] {
+      if (!Number.isSafeInteger(limit) || limit < 1) throw new RangeError(`limit must be a positive integer, got ${limit}`);
+      return stmts.callsByEndpoint.all(endpointIdToString(endpointId), limit) as CallRow[];
     },
 
     createWithdrawal(input: {

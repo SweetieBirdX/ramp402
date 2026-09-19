@@ -1,5 +1,7 @@
-// Talks to the real Soroban RPC. Run with `npm run test:integration`. Excluded from the offline
-// `npm test`, and skipped when STELLAR_RPC_URL / STELLAR_NETWORK / CONTRACT_ID are not set.
+// Talks to the real Soroban RPC and the deployed ramp_ledger. Run with `npm run test:integration`.
+// Excluded from the offline `npm test`, and skipped when STELLAR_RPC_URL / STELLAR_NETWORK /
+// CONTRACT_ID are not set.
+import { Keypair } from "@stellar/stellar-sdk";
 import dotenv from "dotenv";
 import { describe, expect, it } from "vitest";
 import { createStellarClient, scv, SorobanError, stellarConfigFromEnv } from "./stellar.js";
@@ -8,36 +10,35 @@ dotenv.config({ quiet: true });
 
 const configured = Boolean(process.env.STELLAR_RPC_URL && process.env.STELLAR_NETWORK && process.env.CONTRACT_ID);
 
-async function readViewError(method: string, args: Parameters<typeof scv.u64>[0][] = []): Promise<SorobanError> {
-  const client = createStellarClient(stellarConfigFromEnv());
-  const err = await client.readView(method, args.map(scv.u64)).then(
-    () => undefined,
-    (e: unknown) => e,
-  );
-  expect(err).toBeInstanceOf(SorobanError);
-  return err as SorobanError;
-}
+describe.skipIf(!configured)("Soroban RPC wiring against the deployed ramp_ledger (network)", () => {
+  const client = () => createStellarClient(stellarConfigFromEnv());
 
-describe.skipIf(!configured)("Soroban RPC wiring (network)", () => {
-  // TODO(real contract): every function of the deployed stub is todo!(), so get_endpoint traps.
-  // Once the real ramp_ledger is deployed, register an endpoint and assert readView returns
-  // { seller, price } instead. Until then this trap is the proof that simulation reached our
-  // contract and ran get_endpoint with a correctly encoded u64: a wrong CONTRACT_ID, method name or
-  // argument count each fails with a different host error (the other two tests pin that down).
-  it("readView('get_endpoint', [u64]) reaches the contract and executes get_endpoint", async () => {
-    const err = await readViewError("get_endpoint", [1n]);
-    expect(err.stage).toBe("simulation");
-    expect(err.message).toMatch(/fn_call, C[A-Z2-7]{55}, get_endpoint\], data:1\b/);
-    expect(err.message).toMatch(/VM call trapped: UnreachableCodeReached/);
+  it("get_operator returns the operator this gateway signs with", async () => {
+    const c = client();
+    const operator = await c.readView<string>("get_operator", []);
+    expect(operator).toMatch(/^G[A-Z2-7]{55}$/);
+    // Every record_call / settle fails with NotOperator if these two ever differ.
+    if (c.operatorAddress) expect(operator).toBe(c.operatorAddress);
   }, 30_000);
 
-  it("a wrong method name fails differently from the stub trap", async () => {
-    const err = await readViewError("no_such_function");
+  it("get_balance for an address that never earned anything is 0 (as bigint, i128)", async () => {
+    const balance = await client().readView<bigint>("get_balance", [scv.address(Keypair.random().publicKey())]);
+    expect(balance).toBe(0n);
+  }, 30_000);
+
+  it("get_endpoint for an unknown id fails with contract error 2 (EndpointNotFound)", async () => {
+    const err = await client()
+      .readView("get_endpoint", [scv.u64(2n ** 63n)])
+      .then(() => undefined, (e: unknown) => e);
+    expect(err).toBeInstanceOf(SorobanError);
+    expect((err as SorobanError).contractErrorCode).toBe(2);
+  }, 30_000);
+
+  it("a wrong method name is a host error, not a contract error", async () => {
+    const err = (await client()
+      .readView("no_such_function", [])
+      .then(() => undefined, (e: unknown) => e)) as SorobanError;
     expect(err.message).toMatch(/non-existent contract function/);
-  }, 30_000);
-
-  it("a wrong argument count fails differently from the stub trap", async () => {
-    const err = await readViewError("get_endpoint");
-    expect(err.message).toMatch(/MismatchingParameterLen/);
+    expect(err.contractErrorCode).toBeUndefined();
   }, 30_000);
 });

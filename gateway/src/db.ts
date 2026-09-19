@@ -34,8 +34,12 @@ function prepareStatements(db: Db) {
       "INSERT INTO calls (id, endpoint_id, agent_address, amount_stroops, status, tx_hash) VALUES (?, ?, ?, ?, ?, ?)",
     ),
     callById: db.prepare("SELECT * FROM calls WHERE id = ?"),
+    endpointsWithCallCountBySeller: db.prepare(
+      `SELECT e.*, (SELECT COUNT(*) FROM calls c WHERE c.endpoint_id = e.id) AS call_count
+       FROM endpoints e WHERE e.seller_id = ? ORDER BY e.created_at DESC, e.rowid DESC`,
+    ),
     callsByEndpoint: db.prepare(
-      "SELECT * FROM calls WHERE endpoint_id = ? ORDER BY created_at DESC, rowid DESC",
+      "SELECT * FROM calls WHERE endpoint_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
     ),
 
     insertWithdrawal: db.prepare(

@@ -122,9 +122,14 @@ export interface GetWithdrawalResponse {
 // Read endpoints
 // ---------------------------------------------------------------------------------------------
 
-/** One row of GET /api/endpoints — the submit response plus its creation time. */
+/**
+ * One row of GET /api/endpoints: the submit response plus its creation time and how many calls it
+ * has logged. upstream_url never carries credentials here (userinfo and secret-looking query values
+ * are redacted).
+ */
 export interface EndpointSummary extends SubmitEndpointResponse {
   created_at: string;
+  call_count: number;
 }
 
 /** GET /api/endpoints — only the authenticated seller's own endpoints. */

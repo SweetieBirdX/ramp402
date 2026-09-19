@@ -1,12 +1,34 @@
+import { InvalidAuthTokenError } from "@privy-io/node";
 import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
+import { createAuthMiddleware } from "./auth.js";
+import { openDatabase } from "./db.js";
+import { createFunder } from "./funding.js";
+import { createRepo } from "./repo.js";
 
-const app = createApp({ log: false });
+// Only route registration and validation are under test here; every dependency is inert.
+const repo = createRepo(openDatabase(":memory:"));
+const app = createApp(
+  {
+    repo,
+    authenticate: createAuthMiddleware({
+      verifyToken: async () => {
+        throw new InvalidAuthTokenError("test: no token is valid");
+      },
+      repo,
+    }),
+    findStellarWallet: async () => null,
+    readBalance: async () => 0n,
+    funder: createFunder({ accountExists: async () => false, friendbotUrl: undefined }),
+  },
+  { log: false },
+);
 
 const VALID_XDR = "AAAAAgAAAAA="; // shape-valid base64; not a real transaction
 
-// Every route in docs/CONVENTIONS.md §1.3, each with a request that passes validation.
+// Every not-yet-implemented route in docs/CONVENTIONS.md §1.3, each with a request that passes validation.
+// Implemented routes have their own test files; here they only have to exist and require a token.
 const ROUTES: Array<{
   method: "get" | "post";
   path: string;
@@ -14,7 +36,6 @@ const ROUTES: Array<{
   body?: object;
   headers?: Record<string, string>;
 }> = [
-  { method: "post", path: "/api/sellers/bootstrap", name: "POST /api/sellers/bootstrap" },
   {
     method: "post",
     path: "/api/endpoints/prepare",
@@ -35,9 +56,6 @@ const ROUTES: Array<{
     body: { draft_id: "draft123", signed_xdr: VALID_XDR },
   },
   { method: "get", path: "/api/withdrawals/w123", name: "GET /api/withdrawals/:id" },
-  { method: "get", path: "/api/endpoints", name: "GET /api/endpoints" },
-  { method: "get", path: "/api/balance", name: "GET /api/balance" },
-  { method: "get", path: "/api/calls?endpoint_id=1", name: "GET /api/calls" },
   {
     method: "get",
     path: "/proxy/wthr1234",
@@ -68,6 +86,17 @@ describe("§1.3 routes are all registered", () => {
     expect(res.body).toEqual({ error: "not_implemented", message: name });
   });
 
+  it.each([
+    ["post", "/api/sellers/bootstrap"],
+    ["get", "/api/endpoints"],
+    ["get", "/api/balance"],
+    ["get", "/api/calls?endpoint_id=1"],
+  ] as const)("%s %s is registered and requires a Privy token", async (method, path) => {
+    const res = await request(app)[method](path);
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: "unauthorized", message: expect.any(String) });
+  });
+
   it("an unknown route is a JSON 404 in the §1.1 shape", async () => {
     const res = await request(app).get("/api/does-not-exist");
     expect(res.status).toBe(404);
@@ -89,11 +118,7 @@ describe("zod validation rejects malformed requests with { error, message }", ()
     ["renamed field (price instead of price_stroops)", "post", "/api/endpoints/prepare", { upstream_url: "https://x.test", price_stroops: 1, price: 1 }, /price/],
     ["missing signed_xdr", "post", "/api/endpoints/submit", { draft_id: "d1" }, /body\.signed_xdr/],
     ["non-base64 signed_xdr", "post", "/api/withdraw/submit", { draft_id: "d1", signed_xdr: "not xdr!" }, /body\.signed_xdr/],
-    ["unexpected body on bootstrap", "post", "/api/sellers/bootstrap", { anything: 1 }, /anything/],
     ["unexpected body on withdraw/prepare", "post", "/api/withdraw/prepare", { amount_stroops: 1 }, /amount_stroops/],
-    ["missing endpoint_id query", "get", "/api/calls", undefined, /query\.endpoint_id/],
-    ["non-decimal endpoint_id query", "get", "/api/calls?endpoint_id=abc", undefined, /query\.endpoint_id/],
-    ["endpoint_id above u64", "get", "/api/calls?endpoint_id=18446744073709551616", undefined, /query\.endpoint_id/],
   ];
 
   it.each(rejects)("%s → 400 invalid_request", async (_label, method, path, body, messagePattern) => {

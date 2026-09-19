@@ -179,6 +179,17 @@ export function createStellarClient(config: StellarConfig) {
       return prepared.toXDR();
     },
 
+    /** Whether a classic G… account exists on the ledger (i.e. has been funded). */
+    async accountExists(address: string): Promise<boolean> {
+      try {
+        await server.getAccount(address);
+        return true;
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith("Account not found")) return false;
+        throw err;
+      }
+    },
+
     /** Parses a signed envelope, submits it and waits for the result. */
     async submitSignedXdr(signedXdr: string): Promise<InvokeResult> {
       const tx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);

@@ -1,4 +1,3 @@
-import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,34 +8,12 @@ import { createAuthMiddleware, createPrivyVerifier } from "./auth.js";
 import { openDatabase, type DbHandle } from "./db.js";
 import { errorHandler } from "./errors.js";
 import { createRepo } from "./repo.js";
+import { privyTestKeys, privyToken, TEST_PRIVY_APP_ID } from "./testing/privy.js";
 
-// Real Privy SDK verification, offline: tokens are signed with a local ES256 key and the verifier is
-// given the matching public key, exactly as it would otherwise receive Privy's key from JWKS.
-const APP_ID = "test-app-id";
 const SELLER_ADDRESS = "GCN7VANEAHQJ2BA4FEGYLD7P444UW4SE4U3AR2NQCIO4M73L66XWILI6";
 
-const b64url = (v: string | Buffer) => Buffer.from(v).toString("base64url");
-
-function privyToken(privateKey: KeyObject, claims: Record<string, unknown> = {}): string {
-  const now = Math.floor(Date.now() / 1000);
-  const header = b64url(JSON.stringify({ alg: "ES256", typ: "JWT" }));
-  const payload = b64url(
-    JSON.stringify({
-      iss: "privy.io",
-      aud: APP_ID,
-      sub: "did:privy:seller-1",
-      sid: "session-1",
-      iat: now,
-      exp: now + 3600,
-      ...claims,
-    }),
-  );
-  const signature = sign("sha256", Buffer.from(`${header}.${payload}`), { key: privateKey, dsaEncoding: "ieee-p1363" });
-  return `${header}.${payload}.${b64url(signature)}`;
-}
-
-const keys = generateKeyPairSync("ec", { namedCurve: "P-256" });
-const otherKeys = generateKeyPairSync("ec", { namedCurve: "P-256" });
+const keys = privyTestKeys();
+const otherKeys = privyTestKeys();
 
 let dir: string;
 let handle: DbHandle;
@@ -49,9 +26,9 @@ beforeAll(() => {
   repo.createSeller({ privy_user_id: "did:privy:seller-1", stellar_address: SELLER_ADDRESS });
 
   const verifyToken = createPrivyVerifier({
-    appId: APP_ID,
+    appId: TEST_PRIVY_APP_ID,
     appSecret: "unused-offline",
-    jwtVerificationKey: keys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    jwtVerificationKey: keys.publicKeyPem,
   });
 
   app = express();
