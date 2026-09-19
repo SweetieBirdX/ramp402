@@ -9,7 +9,10 @@
  *
  * Nothing here ever prints a secret key.
  */
-import { config as loadEnv } from "dotenv";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { config as loadEnv, parse as parseEnv } from "dotenv";
 import {
   Account,
   Address,
@@ -29,8 +32,21 @@ import {
   type xdr,
 } from "@stellar/stellar-sdk";
 
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
 // A root .env is optional and gitignored; real environment variables win.
-loadEnv({ quiet: true });
+loadEnv({ path: resolve(ROOT, ".env"), quiet: true });
+
+// gateway/.env is where the running system actually keeps its keys, and it is where setup.ts tells
+// you to paste them. Read it as a fallback — for variables that are unset OR empty, since a copied
+// .env.example leaves `PLATFORM_POOL_SECRET_KEY=` behind — so that a re-run reuses those keys
+// instead of minting a second platform pool.
+const gatewayEnvPath = resolve(ROOT, "gateway", ".env");
+if (existsSync(gatewayEnvPath)) {
+  for (const [name, value] of Object.entries(parseEnv(readFileSync(gatewayEnvPath)))) {
+    if (!process.env[name]?.trim() && value.trim()) process.env[name] = value;
+  }
+}
 
 // --------------------------------------------------------------------------------------------
 // Configuration

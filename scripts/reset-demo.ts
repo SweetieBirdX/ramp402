@@ -65,7 +65,15 @@ async function main(): Promise<void> {
         .all() as { name: string }[];
       const names = tables.map((t) => t.name).filter((n) => !n.startsWith("sqlite_"));
       if (names.length === 0) throw new Error("schema.sql created no tables");
-      return names.join(", ");
+      // "Deleted" is only true if what came back is empty. A delete that silently did nothing
+      // would otherwise pass here and leave the last rehearsal's rows in the dashboard.
+      const leftovers = names.filter(
+        (n) => (db.prepare(`SELECT COUNT(*) AS n FROM "${n}"`).get() as { n: number }).n > 0,
+      );
+      if (leftovers.length > 0) {
+        throw new Error(`the recreated cache is not empty (${leftovers.join(", ")}) — the delete did not happen`);
+      }
+      return `${names.join(", ")} — all empty`;
     } finally {
       db.close();
     }

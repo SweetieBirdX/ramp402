@@ -5,13 +5,13 @@
  * must agree about what "the demo endpoint" is, or a reset between rehearsals
  * quietly produces a different one.
  */
-import { readFileSync, existsSync, rmSync } from "node:fs";
+import { readFileSync, existsSync, unlinkSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { nanoid } from "nanoid";
 import { Keypair } from "@stellar/stellar-sdk";
-import { invoke, scv, STROOPS_PER_UNIT } from "./chain.js";
+import { invoke, read, scv, STROOPS_PER_UNIT } from "./chain.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HERE, "..", "..");
@@ -25,7 +25,7 @@ export const DEMO_UPSTREAM_URL =
   process.env.DEMO_UPSTREAM_URL?.trim() || "https://api.frankfurter.dev/v1/latest?base=USD&symbols=TRY";
 
 /** 0.1 USDC a call. Small enough that a demo budget buys several. */
-export const DEMO_PRICE_STROOPS = BigInt(process.env.DEMO_PRICE_STROOPS ?? "1000000");
+export const DEMO_PRICE_STROOPS = BigInt(process.env.DEMO_PRICE_STROOPS?.trim() || "1000000");
 
 /** Demo rows carry fixed ids so a re-run replaces them instead of piling up. */
 export const DEMO_SELLER_ID = "demo-seller";
@@ -54,15 +54,29 @@ export function openDatabase(): Database.Database {
   return db;
 }
 
-/** Delete the cache and its write-ahead files. The chain is the source of truth. */
+/**
+ * Delete the cache and its write-ahead files. The chain is the source of truth.
+ *
+ * `unlinkSync`, not `rmSync`: on Windows, Node 24's `rmSync` returns without error and deletes
+ * nothing when the path contains a non-ASCII character — `C:\Users\Ömer\…` is enough. The
+ * existence check afterwards catches any other way a delete can be silently skipped.
+ */
 export function deleteDatabase(): string[] {
   const base = databasePath();
   const removed: string[] = [];
   for (const path of [base, `${base}-wal`, `${base}-shm`]) {
-    if (existsSync(path)) {
-      rmSync(path);
-      removed.push(path.slice(REPO_ROOT.length + 1));
+    if (!existsSync(path)) continue;
+    try {
+      unlinkSync(path);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EBUSY" || code === "EPERM") {
+        throw new Error(`${path} is in use — stop the gateway first, then re-run (${code})`);
+      }
+      throw err;
     }
+    if (existsSync(path)) throw new Error(`${path} still exists after deleting it`);
+    removed.push(path.slice(REPO_ROOT.length + 1));
   }
   return removed;
 }
@@ -73,6 +87,37 @@ export interface DemoEndpoint {
   upstreamUrl: string;
   priceStroops: bigint;
   sellerAddress: string;
+}
+
+/**
+ * The demo endpoint this seller already has, if it is both cached AND still on chain with the
+ * seller and price we expect — so re-running setup.ts does not register a new one every time.
+ *
+ * The on-chain check matters: after a contract redeploy the cached id may not exist, or may belong
+ * to someone else's endpoint on the new contract. Anything that does not match exactly is ignored
+ * and a fresh endpoint is registered.
+ */
+export async function findLiveDemoEndpoint(
+  db: Database.Database,
+  seller: Keypair,
+): Promise<{ endpointId: bigint; proxySlug: string } | undefined> {
+  const row = db
+    .prepare(
+      `SELECT e.id, e.proxy_slug FROM endpoints e JOIN sellers s ON s.id = e.seller_id
+       WHERE e.seller_id = ? AND s.stellar_address = ? AND e.proxy_slug NOT LIKE '%-retired-%'
+       ORDER BY CAST(e.id AS INTEGER) DESC LIMIT 1`,
+    )
+    .get(DEMO_SELLER_ID, seller.publicKey()) as { id: string; proxy_slug: string } | undefined;
+  if (!row) return undefined;
+
+  const endpointId = BigInt(row.id);
+  try {
+    const info = await read<{ seller: string; price: bigint }>("get_endpoint", [scv.u64(endpointId)], seller);
+    if (info.seller !== seller.publicKey() || BigInt(info.price) !== DEMO_PRICE_STROOPS) return undefined;
+  } catch {
+    return undefined; // EndpointNotFound — the cache outlived the contract.
+  }
+  return { endpointId, proxySlug: row.proxy_slug };
 }
 
 /** Register the demo endpoint on chain. The seller signs for itself. */
@@ -95,8 +140,9 @@ export function cacheDemoEndpoint(
   db: Database.Database,
   endpointId: bigint,
   sellerAddress: string,
+  existingSlug?: string,
 ): DemoEndpoint {
-  const proxySlug = process.env.DEMO_PROXY_SLUG?.trim() || nanoid(8);
+  const proxySlug = process.env.DEMO_PROXY_SLUG?.trim() || existingSlug || nanoid(8);
 
   db.prepare(
     `INSERT INTO sellers (id, privy_user_id, stellar_address)

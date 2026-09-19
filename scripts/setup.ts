@@ -18,11 +18,13 @@
  *      once, for a human to place.
  *
  * Idempotent: every account it would create is reused if the matching secret is
- * already in the environment, and Friendbot funding and the trustline are both
- * no-ops when they are already done. Re-running it is safe. What it does create
- * fresh each time is the demo endpoint, because endpoint ids come from the
- * contract's counter and are never reused.
+ * already in the environment (the root .env, or gateway/.env as a fallback), and
+ * Friendbot funding and the trustline are both no-ops when they are already done.
+ * The demo endpoint is reused too, as long as it is cached in SQLite and still on
+ * chain with the same seller and price; otherwise a fresh one is registered.
+ * Re-running it is safe.
  */
+import { randomBytes } from "node:crypto";
 import { Asset, Keypair, StellarToml } from "@stellar/stellar-sdk";
 import {
   CONTRACT_ID,
@@ -37,13 +39,16 @@ import {
 import {
   DEMO_UPSTREAM_URL,
   cacheDemoEndpoint,
+  findLiveDemoEndpoint,
   openDatabase,
   priceLabel,
   registerDemoEndpoint,
   type DemoEndpoint,
 } from "./lib/demo.js";
 
-const ANCHOR_HOME_DOMAIN = process.env.ANCHOR_HOME_DOMAIN?.trim() || "testanchor.stellar.org";
+// No default. A silent fallback would put the pool's trustline on whatever issuer some other anchor
+// lists, and the gateway would then off-ramp against a different anchor than the one configured.
+const ANCHOR_HOME_DOMAIN = process.env.ANCHOR_HOME_DOMAIN?.trim();
 
 /** A key taken from the environment, or minted here — the summary says which. */
 interface ResolvedKey {
@@ -107,6 +112,15 @@ async function main(): Promise<void> {
     console.error("        --source-account ramp402-operator -- set_operator --new_operator G...");
     process.exit(1);
   }
+  if (!ANCHOR_HOME_DOMAIN) {
+    console.error("[FAIL] ANCHOR_HOME_DOMAIN is not set.");
+    console.error();
+    console.error("  The USDC issuer for the pool's trustline is read from this anchor's stellar.toml,");
+    console.error("  and there is deliberately no default. For the testnet demo:");
+    console.error();
+    console.error("      ANCHOR_HOME_DOMAIN=testanchor.stellar.org");
+    process.exit(1);
+  }
 
   const operator = Keypair.fromSecret(operatorSecret);
   const pool = resolveKey("PLATFORM_POOL_SECRET_KEY");
@@ -120,9 +134,16 @@ async function main(): Promise<void> {
   console.log(`  anchor     ${ANCHOR_HOME_DOMAIN}`);
   console.log();
 
-  const steps = createSteps(7);
+  const steps = createSteps(8);
   let usdc: Asset | undefined;
   let demo: DemoEndpoint | undefined;
+
+  // Funded, never created: the operator is whoever the contract was deployed with. On a fresh
+  // testnet this is also what makes the check below possible — it needs the account to exist.
+  await steps.step("operator account funded", async () => {
+    const state = await friendbotFund(operator.publicKey());
+    return `${short(operator.publicKey())} ${state}`;
+  });
 
   await steps.step("the operator key matches the deployed contract", async () => {
     const stored = await read<string>("get_operator", [], operator);
@@ -169,14 +190,16 @@ async function main(): Promise<void> {
   });
 
   await steps.step("demo endpoint registered and cached", async () => {
-    const endpointId = await registerDemoEndpoint(demoSeller.keypair);
     const db = openDatabase();
     try {
-      demo = cacheDemoEndpoint(db, endpointId, demoSeller.keypair.publicKey());
+      const live = await findLiveDemoEndpoint(db, demoSeller.keypair);
+      const endpointId = live?.endpointId ?? (await registerDemoEndpoint(demoSeller.keypair));
+      demo = cacheDemoEndpoint(db, endpointId, demoSeller.keypair.publicKey(), live?.proxySlug);
+      const state = live ? "already registered" : "registered";
+      return `endpoint_id ${demo.endpointId} ${state} → /proxy/${demo.proxySlug} at ${priceLabel()}`;
     } finally {
       db.close();
     }
-    return `endpoint_id ${demo.endpointId} → /proxy/${demo.proxySlug} at ${priceLabel()}`;
   });
 
   // ------------------------------------------------------------------------------------------
@@ -188,7 +211,16 @@ async function main(): Promise<void> {
   console.log("Paste into gateway/.env — these are testnet keys, and they are still secrets.");
   console.log("─".repeat(92));
   console.log();
+  const encryptionKey = process.env.UPSTREAM_CRED_ENCRYPTION_KEY?.trim();
+  const port = process.env.PORT?.trim() || "3001";
+
+  console.log(`PORT=${port}`);
+  console.log(`STELLAR_NETWORK=testnet`);
+  console.log(`STELLAR_RPC_URL=${RPC_URL}`);
   console.log(`CONTRACT_ID=${CONTRACT_ID}`);
+  console.log(`ANCHOR_HOME_DOMAIN=${ANCHOR_HOME_DOMAIN}`);
+  console.log(`X402_FACILITATOR_URL=${process.env.X402_FACILITATOR_URL?.trim() || "https://x402.org/facilitator"}`);
+  console.log(`DB_PATH=${process.env.DB_PATH?.trim() || "ramp402.db"}`);
   console.log(`# OPERATOR_SECRET_KEY — unchanged, the one you passed in. Not reprinted.`);
   if (pool.generated) {
     console.log(`PLATFORM_POOL_SECRET_KEY=${pool.keypair.secret()}`);
@@ -204,6 +236,15 @@ async function main(): Promise<void> {
   } else {
     console.log(`# TREASURY_ADDRESS — unchanged (${short(treasury.publicKey)})`);
   }
+  if (encryptionKey) {
+    console.log(`# UPSTREAM_CRED_ENCRYPTION_KEY — unchanged. Rotating it makes every stored credential unreadable.`);
+  } else {
+    // 256-bit AES-GCM key, hex (credentials.ts). Printed once like every other secret.
+    console.log(`UPSTREAM_CRED_ENCRYPTION_KEY=${randomBytes(32).toString("hex")}`);
+  }
+  if (!process.env.PRIVY_APP_ID?.trim() || !process.env.PRIVY_APP_SECRET?.trim()) {
+    console.log(`# PRIVY_APP_ID and PRIVY_APP_SECRET come from the Privy dashboard — no script can make them.`);
+  }
   console.log();
   console.log(`# Demo fixtures — not read by the gateway, used by scripts/reset-demo.ts.`);
   console.log(`# Keep them to get the same demo endpoint back after a reset.`);
@@ -216,7 +257,7 @@ async function main(): Promise<void> {
   }
   console.log();
   console.log(`Try it once the gateway is running:`);
-  console.log(`  curl -i http://localhost:${process.env.PORT ?? "3001"}/proxy/${demo?.proxySlug ?? "<slug>"}`);
+  console.log(`  curl -i http://localhost:${port}/proxy/${demo?.proxySlug ?? "<slug>"}`);
   console.log(`  → 402, because the agent has not paid yet. That is the product working.`);
 
   steps.finish(`ready — demo endpoint ${demo?.endpointId} on ${CONTRACT_ID}`);
