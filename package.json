@@ -1,0 +1,22 @@
+{
+  "name": "ramp402-scripts",
+  "version": "0.1.0",
+  "description": "Root workspace for scripts/ — setup, demo reset and the verification scripts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke:contract": "tsx scripts/smoke-contract.ts"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^17.1.0",
+    "dotenv": "^18.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

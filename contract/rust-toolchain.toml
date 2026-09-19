@@ -1,0 +1,8 @@
+# Pinned on purpose. The Stellar CLI refuses to build contracts with Rust 1.81,
+# 1.82, 1.83 or 1.91.0 — those versions emit wasm it considers unsafe to deploy.
+# Pinning here means `cargo build` and `stellar contract build` cannot silently
+# produce an artifact the CLI would have rejected, whatever the machine's
+# default toolchain happens to be.
+[toolchain]
+channel = "1.90.0"
+targets = ["wasm32v1-none", "wasm32-unknown-unknown"]
