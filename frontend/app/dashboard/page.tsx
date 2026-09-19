@@ -693,18 +693,11 @@ export default function DashboardPage() {
 
       {/* Requirements 4 & 6: Completed Withdrawal / Anchor Fiat Proof Card */}
       {(() => {
-        const completedRecord = recentWithdrawals.find((w) => w.status === "completed") || {
-          id: "w_demo_initial",
-          status: "completed" as const,
-          amountStroops: 50000000,
-          amountUsdc: "5.0000000",
-          amountTry: "172.50",
-          externalTransactionId: "TR-FAST-20260919-84729103",
-          anchorTxId: "atx_sep6_live_982413",
-          iban: "TR33 0006 1005 1234 5678 9012 34",
-          recipientName: "Mert Bayazıt",
-          completedAt: "20:45:00",
-        };
+        // Only a withdrawal that actually completed. This used to fall back to an invented record
+        // — a fake bank reference, a fake lira amount and a real person's name — so a dashboard
+        // with no withdrawals at all displayed a finished payout as proof of one.
+        const completedRecord = recentWithdrawals.find((w) => w.status === "completed");
+        if (!completedRecord) return null;
 
         return (
           <div className="border border-emerald-200 bg-emerald-50/40 rounded-xl p-5 shadow-xs">
@@ -754,7 +747,7 @@ export default function DashboardPage() {
               <div className="p-3 rounded-lg bg-white border border-emerald-200">
                 <p className="text-[11px] text-neutral-500 font-medium">Aktarılan Tutar (TRY):</p>
                 <p className="font-bold text-emerald-900 text-base mt-0.5">
-                  ₺{completedRecord.amountTry} TRY
+                  {completedRecord.amountTry ? `₺${completedRecord.amountTry} TRY` : "—"}
                 </p>
                 <p className="text-[10px] text-neutral-400 font-mono">
                   {completedRecord.amountUsdc} USDC

@@ -2,7 +2,6 @@
 
 import { useState, useId } from "react";
 import { useSignRawHash } from "@privy-io/react-auth/extended-chains";
-import { Keypair, Networks, TransactionBuilder } from "@stellar/stellar-sdk";
 import { prepareEndpoint, submitEndpoint, getGatewayUrl, ApiError } from "@/lib/api";
 import { displayToStroops, stroopsToDisplay } from "@/lib/format";
 import { signTransactionWithPrivy } from "@/lib/signing";
@@ -217,27 +216,14 @@ export default function AddEndpointModal({
     let signedXdr: string;
 
     try {
-      // If running under automated demo mode without active Privy TEE user session
-      const isDemoMode =
-        typeof window !== "undefined" &&
-        (new URLSearchParams(window.location.search).get("demo") === "true" ||
-          window.localStorage.getItem("ramp402_demo_auth") === "true" ||
-          stellarAddress === "GC2BKJ6UDTJ2HBBGNTVWNXFM6S7V4V5Y6Z7A8B9C0D1E2F3G4H5I6J7K");
-
-      if (isDemoMode) {
-        // Wait 1.5s to visually demonstrate signing step to user
-        await new Promise((r) => setTimeout(r, 1500));
-        const demoKp = Keypair.fromSecret("SBIEFJ7FPOS73OBTXNUIOQN2KN4TGMZB7ALVPC5GX3WK75TERA46EWSQ");
-        const tx = TransactionBuilder.fromXDR(unsignedXdr, Networks.TESTNET);
-        tx.sign(demoKp);
-        signedXdr = tx.toXDR();
-      } else {
-        signedXdr = await signTransactionWithPrivy(
-          unsignedXdr,
-          stellarAddress,
-          signRawHash
-        );
+      // The seller's key lives in their Privy embedded wallet and nowhere else. There is
+      // deliberately no local signer to fall back to: one used to live here, signing with a
+      // keypair hardcoded in this file, which both bypassed the flow being demonstrated and put a
+      // secret key in a public repository.
+      if (!stellarAddress) {
+        throw new Error("No wallet connected. Sign in with Privy before registering an endpoint.");
       }
+      signedXdr = await signTransactionWithPrivy(unsignedXdr, stellarAddress, signRawHash);
     } catch (err: unknown) {
       setStep("error");
       const errString = err instanceof Error ? err.message : String(err);

@@ -11,14 +11,9 @@ export function setGlobalAccessTokenGetter(getter: (() => Promise<string | null>
 }
 
 export async function getAccessToken(): Promise<string | null> {
-  if (typeof window !== "undefined") {
-    if (
-      new URLSearchParams(window.location.search).get("demo") === "true" ||
-      window.localStorage.getItem("ramp402_demo_auth") === "true"
-    ) {
-      return "demo_access_token";
-    }
-  }
+  // No "demo_access_token" shortcut. It returned a string the gateway could never verify, so every
+  // authenticated call failed — and the modals' simulation fallbacks then dressed those failures up
+  // as successes. The token comes from Privy or there is no token.
   if (globalAccessTokenGetter) {
     try {
       return await globalAccessTokenGetter();
@@ -50,17 +45,6 @@ export function useAuth(): AuthState {
   const { createWallet } = useCreateWallet();
   const [createdAddress, setCreatedAddress] = useState<string | null>(null);
   const [isCreatingWallet, setIsCreatingWallet] = useState(false);
-
-  const [isDemo] = useState(() => {
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      return (
-        params.get("demo") === "true" ||
-        window.localStorage.getItem("ramp402_demo_auth") === "true"
-      );
-    }
-    return false;
-  });
 
   useEffect(() => {
     setGlobalAccessTokenGetter(privyGetAccessToken);
@@ -197,24 +181,10 @@ export function useAuth(): AuthState {
     await logout();
   }, [logout]);
 
-  if (isDemo) {
-    return {
-      ready: true,
-      authenticated: true,
-      stellarAddress: "GC5CYZX6GKDUKLA5HGOQ44UIKMHZJ4GFQO2JJUTF2CTBMHCEK3WQOXYC",
-      getAccessToken: async () => "demo_access_token",
-      user: { id: "did:privy:demo_user_mert" } as unknown as ReturnType<typeof usePrivy>["user"],
-      email: "mert@ramp402.org",
-      login: () => {},
-      logout: handleLogout,
-      isCreatingWallet: false,
-      isBootstrapping: false,
-      isBootstrapped: true,
-      bootstrapError: null,
-      bootstrap: async () => true,
-    };
-  }
-
+  // There is no demo branch here any more. `?demo=true` used to return authenticated: true with a
+  // hardcoded Stellar address, a fabricated Privy user and `bootstrap: () => true` — an account
+  // nobody had logged into, holding an address that was not theirs. Authentication is Privy's
+  // answer or nothing.
   return {
     ready,
     authenticated,

@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState, useId, useRef, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import { useSignRawHash } from "@privy-io/react-auth/extended-chains";
-import { Account, Keypair, Networks, TransactionBuilder } from "@stellar/stellar-sdk";
 import { prepareWithdraw, submitWithdraw, getWithdrawal, ApiError } from "@/lib/api";
 import { stroopsToDisplay } from "@/lib/format";
 import { signTransactionWithPrivy } from "@/lib/signing";
@@ -11,14 +11,6 @@ import type { Sep6Status, GetWithdrawalResponse } from "@/lib/types";
 // -------------------------------------------------------------------------------------------------
 // Icons (Inline SVG to preserve zero-dependency policy)
 // -------------------------------------------------------------------------------------------------
-
-function CheckCircleIcon({ className = "h-5 w-5" }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-    </svg>
-  );
-}
 
 function ExclamationCircleIcon({ className = "h-5 w-5" }: { className?: string }) {
   return (
@@ -253,9 +245,11 @@ export interface CompletedWithdrawalRecord {
   status: Sep6Status | "completed";
   amountStroops: number;
   amountUsdc: string;
-  amountTry: string;
-  externalTransactionId: string;
-  anchorTxId: string;
+  /** The anchor's locked SEP-38 payout. Null when it never quoted — never an estimate. */
+  amountTry: string | null;
+  /** Null unless the anchor actually returned one. */
+  externalTransactionId: string | null;
+  anchorTxId: string | null;
   iban: string;
   recipientName: string;
   completedAt: string;
@@ -275,34 +269,18 @@ type ModalFlowState =
 const MIN_WITHDRAW_STROOPS = BigInt(10_000_000);
 
 /**
- * Shown before the anchor has quoted, and only then. §1.5 forbids hardcoding anything the anchor
- * can tell us, so the moment `quote_buy_amount` arrives from GET /api/withdrawals/:id this is
- * discarded and the anchor's locked rate is displayed instead — that is the figure the seller is
- * actually paid, and it is what the receipt must show.
+ * There is deliberately no estimated exchange rate here. §1.5 forbids hardcoding anything the
+ * anchor can tell us, and a guessed lira figure shown before the withdrawal is a number the seller
+ * would reasonably treat as a promise. The only rate displayed is `quote_buy_amount` — the one the
+ * anchor locked in its SEP-38 quote, which is what actually gets paid.
  */
-const INDICATIVE_TRY_RATE = 48.5;
+const MAX_POLL_FAILURES = 5;
 
-function generateDraftId(): string {
-  return `draft_withdraw_${Date.now()}`;
-}
+// Deleted: generateDraftId, generateWithdrawalId, generateExternalTxId and generateAnchorTxId.
+// They manufactured plausible-looking ids — "TR-FAST-20260919-84729103" and the like — which were
+// then displayed as bank references. Every id shown now comes from the gateway or the anchor, and
+// when there isn't one the UI says so.
 
-function generateWithdrawalId(): string {
-  return `w_${Date.now()}`;
-}
-
-function generateExternalTxId(): string {
-  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const randomSuffix = Math.floor(10000000 + Math.random() * 90000000);
-  return `TR-FAST-${dateStr}-${randomSuffix}`;
-}
-
-function generateAnchorTxId(): string {
-  return `atx_${Math.random().toString(36).substring(2, 11)}`;
-}
-
-function getFormattedTime(): string {
-  return new Date().toLocaleTimeString("tr-TR");
-}
 
 export default function WithdrawModal({
   isOpen,
@@ -322,29 +300,32 @@ export default function WithdrawModal({
   const [flowState, setFlowState] = useState<ModalFlowState>("form");
   const [sep6Status, setSep6Status] = useState<Sep6Status>("pending_user_transfer_start");
   const [withdrawalId, setWithdrawalId] = useState<string | null>(null);
-  const [anchorTxId, setAnchorTxId] = useState<string>("atx_sep6_live_982413");
-  const [externalTxId, setExternalTxId] = useState<string>("TR-FAST-20260919-84729103");
+  // Null until the anchor supplies them. These used to default to convincing-looking literals
+  // ("atx_sep6_live_982413", "TR-FAST-20260919-84729103"), which rendered as a bank reference on a
+  // withdrawal that had not happened.
+  const [anchorTxId, setAnchorTxId] = useState<string | null>(null);
+  const [externalTxId, setExternalTxId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copiedBankRef, setCopiedBankRef] = useState(false);
-  const [trustClaimed, setTrustClaimed] = useState(false);
-  const [isClaimingTrust, setIsClaimingTrust] = useState(false);
+  /** The anchor's claimable balance id, when a missing trustline produced one. */
+  const [claimableBalanceId, setClaimableBalanceId] = useState<string | null>(null);
+  /** `?rehearsal=true` only, read through Next's hook rather than `window` in an effect. */
+  const showRehearsalControls = useSearchParams().get("rehearsal") === "true";
 
   // Polling ref
   const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
   const pollCountRef = useRef(0);
+  /** Consecutive failed polls. Reset by any successful one, so a blip does not end the flow. */
+  const pollFailuresRef = useRef(0);
 
   const stroopsBigInt = BigInt(balanceStroops);
   const isBelowMinimum = stroopsBigInt < MIN_WITHDRAW_STROOPS;
   const usdcAmountDisplay = stroopsToDisplay(balanceStroops);
 
-  /**
-   * What the anchor's SEP-38 quote actually pays out, once it has quoted. Until then an indicative
-   * figure, clearly the estimate rather than the promise.
-   */
+  /** The anchor's locked SEP-38 payout, once it has quoted. Null until then — never estimated. */
   const [quotedTry, setQuotedTry] = useState<string | null>(null);
-  const tryAmountDisplay =
-    quotedTry ?? (parseFloat(usdcAmountDisplay) * INDICATIVE_TRY_RATE).toFixed(2);
   const rateIsLocked = quotedTry !== null;
+
 
   // Cleanup polling on unmount
   useEffect(() => {
@@ -370,9 +351,12 @@ export default function WithdrawModal({
     setWithdrawalId(null);
     setErrorMessage(null);
     setCopiedBankRef(false);
-    setTrustClaimed(false);
-    setIsClaimingTrust(false);
+    setClaimableBalanceId(null);
+    setQuotedTry(null);
+    setAnchorTxId(null);
+    setExternalTxId(null);
     pollCountRef.current = 0;
+    pollFailuresRef.current = 0;
   }, [stopPolling]);
 
   if (!isOpen) return null;
@@ -411,65 +395,32 @@ export default function WithdrawModal({
     let unsignedXdr = "";
     let draftId = "";
 
-    // 1) prepareWithdraw()
+    // 1) prepareWithdraw(). A failure here is a failure: there is no synthetic draft to fall back
+    // on, because a transaction we invented locally is not the one the gateway is waiting for.
     try {
       const prep = await prepareWithdraw();
       unsignedXdr = prep.unsigned_xdr;
       draftId = prep.draft_id;
     } catch (err: unknown) {
-      // If gateway returns 501 or offline during local rehearsals, use simulated draft
-      const is501OrOffline =
-        (err instanceof ApiError && (err.status === 501 || err.status === 0)) ||
-        (err instanceof Error && err.message.includes("failed"));
-
-      if (is501OrOffline) {
-        // Create synthetic draft for smooth presentation
-        draftId = generateDraftId();
-        // Create offline sample transaction
-        const randKp = Keypair.random();
-        const tx = new TransactionBuilder(new Account(randKp.publicKey(), "100"), {
-          fee: "100",
-          networkPassphrase: Networks.TESTNET,
-        })
-          .setTimeout(0)
-          .build();
-        unsignedXdr = tx.toXDR();
-      } else {
-        setFlowState("error");
-        setErrorMessage(err instanceof Error ? err.message : "Çekim taslağı hazırlanamadı.");
-        return;
-      }
+      setFlowState("error");
+      setErrorMessage(
+        err instanceof ApiError
+          ? err.message
+          : `Çekim taslağı hazırlanamadı — ağ geçidine ulaşılamadı. ${err instanceof Error ? err.message : ""}`.trim(),
+      );
+      return;
     }
 
-    // 2) Privy signs unsigned_xdr
+    // 2) Privy signs unsigned_xdr. The seller's key lives in their Privy embedded wallet and
+    // nowhere else; there is deliberately no local signer to fall back to.
     setFlowState("signing");
     let signedXdr = "";
 
     try {
-      const isDemoMode =
-        typeof window !== "undefined" &&
-        (new URLSearchParams(window.location.search).get("demo") === "true" ||
-          window.localStorage.getItem("ramp402_demo_auth") === "true" ||
-          stellarAddress === "GC2BKJ6UDTJ2HBBGNTVWNXFM6S7V4V5Y6Z7A8B9C0D1E2F3G4H5I6J7K" ||
-          !stellarAddress);
-
-      if (isDemoMode) {
-        // Wait 1s for realistic visual progress
-        await new Promise((r) => setTimeout(r, 1000));
-        const demoKp = Keypair.fromSecret("SBIEFJ7FPOS73OBTXNUIOQN2KN4TGMZB7ALVPC5GX3WK75TERA46EWSQ");
-        const tx = TransactionBuilder.fromXDR(unsignedXdr, Networks.TESTNET);
-        tx.sign(demoKp);
-        signedXdr = tx.toXDR();
-      } else {
-        if (!stellarAddress) {
-          throw new Error("Stellar address is required for signing");
-        }
-        signedXdr = await signTransactionWithPrivy(
-          unsignedXdr,
-          stellarAddress,
-          signRawHash
-        );
+      if (!stellarAddress) {
+        throw new Error("Cüzdan bağlı değil. Devam etmek için Privy ile giriş yapın.");
       }
+      signedXdr = await signTransactionWithPrivy(unsignedXdr, stellarAddress, signRawHash);
     } catch (err: unknown) {
       setFlowState("error");
       const errStr = err instanceof Error ? err.message : String(err);
@@ -489,38 +440,35 @@ export default function WithdrawModal({
       const sub = await submitWithdraw(draftId, signedXdr);
       wid = sub.withdrawal_id;
     } catch (err: unknown) {
-      const is501OrOffline =
-        (err instanceof ApiError && (err.status === 501 || err.status === 0)) ||
-        (err instanceof Error && err.message.includes("failed"));
-
-      if (is501OrOffline) {
-        wid = generateWithdrawalId();
-      } else {
-        setFlowState("error");
-        setErrorMessage(err instanceof Error ? err.message : "Çekim işlemi sunucuya iletilemedi.");
-        return;
-      }
+      // No invented withdrawal_id. If the gateway did not record it, there is nothing to poll and
+      // nothing was withdrawn — saying otherwise would be a lie the seller acts on.
+      setFlowState("error");
+      setErrorMessage(
+        err instanceof ApiError
+          ? err.message
+          : `Çekim işlemi sunucuya iletilemedi. ${err instanceof Error ? err.message : ""}`.trim(),
+      );
+      return;
     }
 
     setWithdrawalId(wid);
     setFlowState("polling");
     setSep6Status("pending_user_transfer_start");
 
-    // 4) Poll getWithdrawal(id) every 2 seconds
+    // 4) Poll getWithdrawal(id) every 2 seconds. Transaction references stay empty until the
+    // anchor supplies real ones — a placeholder here would be indistinguishable from a receipt.
     pollCountRef.current = 0;
-    const generatedExtId = generateExternalTxId();
-    const generatedAnchorTxId = generateAnchorTxId();
-
-    setExternalTxId(generatedExtId);
-    setAnchorTxId(generatedAnchorTxId);
+    pollFailuresRef.current = 0;
+    setExternalTxId(null);
+    setAnchorTxId(null);
 
     stopPolling();
     pollTimerRef.current = setInterval(async () => {
       pollCountRef.current += 1;
-      const count = pollCountRef.current;
 
       try {
         const pollRes: GetWithdrawalResponse = await getWithdrawal(wid);
+        pollFailuresRef.current = 0;
         const resolvedStatus = (pollRes.anchor_status || pollRes.status) as Sep6Status;
 
         // The anchor's locked rate replaces the indicative one as soon as it exists (§1.5).
@@ -533,6 +481,9 @@ export default function WithdrawModal({
         if (pollRes.anchor_tx_id) {
           setAnchorTxId(pollRes.anchor_tx_id);
         }
+        if (pollRes.claimable_balance_id) {
+          setClaimableBalanceId(pollRes.claimable_balance_id);
+        }
 
         setSep6Status(resolvedStatus);
 
@@ -544,9 +495,10 @@ export default function WithdrawModal({
             status: "completed",
             amountStroops: balanceStroops,
             amountUsdc: usdcAmountDisplay,
-            amountTry: tryAmountDisplay,
-            externalTransactionId: pollRes.external_transaction_id || generatedExtId,
-            anchorTxId: pollRes.anchor_tx_id || generatedAnchorTxId,
+            // Only what the anchor actually said. An absent reference stays absent.
+            amountTry: pollRes.quote_buy_amount ?? null,
+            externalTransactionId: pollRes.external_transaction_id ?? null,
+            anchorTxId: pollRes.anchor_tx_id ?? null,
             iban,
             recipientName,
             completedAt: new Date().toLocaleTimeString("tr-TR"),
@@ -581,34 +533,20 @@ export default function WithdrawModal({
           );
           return;
         }
-      } catch {
-        // Simulated progression for demo rehearsal when backend route is stubbed
-        if (count === 1) {
-          setSep6Status("pending_user_transfer_start");
-        } else if (count === 2) {
-          setSep6Status("pending_anchor");
-        } else if (count === 3) {
-          setSep6Status("pending_external");
-        } else if (count >= 4) {
-          stopPolling();
-          setSep6Status("completed");
-          setFlowState("completed");
+      } catch (err: unknown) {
+        // A poll that fails says nothing about the withdrawal — only that we could not ask.
+        // Tolerate a few blips, then stop and say so. A terminal state is NEVER synthesised here:
+        // the money either moved or it did not, and this screen must not be the one to decide.
+        pollFailuresRef.current += 1;
+        if (pollFailuresRef.current < MAX_POLL_FAILURES) return;
 
-          const record: CompletedWithdrawalRecord = {
-            id: wid,
-            status: "completed",
-            amountStroops: balanceStroops,
-            amountUsdc: usdcAmountDisplay,
-            amountTry: tryAmountDisplay,
-            externalTransactionId: generatedExtId,
-            anchorTxId: generatedAnchorTxId,
-            iban,
-            recipientName,
-            completedAt: getFormattedTime(),
-          };
-          saveCompletedWithdrawal(record);
-          onSuccess?.(record);
-        }
+        stopPolling();
+        setFlowState("error");
+        setErrorMessage(
+          `Ağ geçidine ulaşılamıyor, çekim durumu doğrulanamadı (${pollFailuresRef.current} deneme). ` +
+            `Çekim talebi ${wid} kaydedildi ve arka planda sürüyor olabilir — durumu için tekrar deneyin. ` +
+            `Son hata: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }, 2000);
   };
@@ -624,56 +562,30 @@ export default function WithdrawModal({
     }
   };
 
-  // Claim balance path for pending_trust
-  const handleClaimBalance = async () => {
-    setIsClaimingTrust(true);
-    await new Promise((r) => setTimeout(r, 1200));
-    setIsClaimingTrust(false);
-    setTrustClaimed(true);
-    setSep6Status("pending_external");
-    setFlowState("polling");
+  /**
+   * `pending_trust` means the anchor could not deliver because a USDC trustline is missing, and it
+   * has parked the funds in a claimable balance.
+   *
+   * There is no claim button here, deliberately. Claiming requires the seller to sign a
+   * `claimClaimableBalance` operation, and neither the gateway nor this component has a flow for
+   * that yet — the previous implementation was a 1.2 second timer that declared success and wrote
+   * a completed record. What the UI can honestly do is surface the balance id the anchor gave us
+   * and let the seller claim it themselves; see the pending_trust panel below.
+   */
 
-    // Resume polling to finish
-    setTimeout(() => {
-      setSep6Status("completed");
-      setFlowState("completed");
-      const record: CompletedWithdrawalRecord = {
-        id: withdrawalId || generateWithdrawalId(),
-        status: "completed",
-        amountStroops: balanceStroops,
-        amountUsdc: usdcAmountDisplay,
-        amountTry: tryAmountDisplay,
-        externalTransactionId: externalTxId,
-        anchorTxId,
-        iban,
-        recipientName,
-        completedAt: getFormattedTime(),
-      };
-      saveCompletedWithdrawal(record);
-      onSuccess?.(record);
-    }, 2000);
-  };
-
-  // Interactive Rehearsal shortcuts for judging
+  /**
+   * Rehearsal shortcuts, reachable only via `?rehearsal=true`.
+   *
+   * These drive the UI through anchor states without an anchor, for practising the demo. A
+   * simulated "completed" is NOT written to the withdrawal history any more — a rehearsal that
+   * leaves a fake receipt behind is indistinguishable from a real one the next time the dashboard
+   * loads.
+   */
   const simulateState = (status: Sep6Status) => {
     stopPolling();
     setSep6Status(status);
     if (status === "completed") {
       setFlowState("completed");
-      const record: CompletedWithdrawalRecord = {
-        id: withdrawalId || "w_demo_rehearsal",
-        status: "completed",
-        amountStroops: balanceStroops || 50000000,
-        amountUsdc: usdcAmountDisplay !== "0.00" ? usdcAmountDisplay : "5.00",
-        amountTry: tryAmountDisplay !== "0.00" ? tryAmountDisplay : "172.50",
-        externalTransactionId: externalTxId,
-        anchorTxId,
-        iban,
-        recipientName,
-        completedAt: getFormattedTime(),
-      };
-      saveCompletedWithdrawal(record);
-      onSuccess?.(record);
     } else if (status === "pending_trust") {
       setFlowState("pending_trust");
     } else if (status === "error") {
@@ -819,15 +731,15 @@ export default function WithdrawModal({
                 </div>
                 <div className="border-l border-emerald-200 pl-4">
                   <p className="text-xs text-emerald-700 font-medium">
-                    {rateIsLocked ? "Fiat Payout (rate locked)" : "Estimated Fiat Payout"}
+                    {rateIsLocked ? "Fiat Payout (rate locked)" : "Fiat Payout"}
                   </p>
                   <p className="text-2xl font-extrabold tracking-tight mt-0.5 text-emerald-900">
-                    ₺{tryAmountDisplay} TRY
+                    {rateIsLocked ? `₺${quotedTry} TRY` : "—"}
                   </p>
                   <p className="text-[11px] text-emerald-600 mt-0.5">
                     {rateIsLocked
                       ? "Rate locked by the anchor's SEP-38 quote"
-                      : `1 USDC ≈ ${INDICATIVE_TRY_RATE.toFixed(2)} TRY — indicative until the anchor quotes`}
+                      : "Rate quoted by the anchor upon withdrawal"}
                   </p>
                 </div>
               </div>
@@ -936,23 +848,31 @@ export default function WithdrawModal({
               </div>
 
               <div className="bg-white p-3.5 rounded-md border border-amber-200 text-xs space-y-2 text-neutral-700">
-                <p className="font-semibold text-neutral-900">Claim Balance to Resume Off-Ramp:</p>
-                <p className="text-[11px] text-neutral-600">
-                  Click below to claim your pending balance and signal the anchor to continue the Turkish Lira bank wire.
-                </p>
-                <button
-                  type="button"
-                  onClick={handleClaimBalance}
-                  disabled={isClaimingTrust || trustClaimed}
-                  className="w-full mt-2 py-2.5 px-4 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-md font-bold text-xs shadow-xs transition-colors flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  {isClaimingTrust ? (
-                    <span className="inline-block h-3.5 w-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  ) : (
-                    <CheckCircleIcon className="h-4 w-4" />
-                  )}
-                  <span>Claim Your Balance &amp; Resume Transfer</span>
-                </button>
+                <p className="font-semibold text-neutral-900">Your claimable balance</p>
+                {claimableBalanceId ? (
+                  <>
+                    <p className="text-[11px] text-neutral-600">
+                      Add a USDC trustline to your account, then claim this balance. The anchor
+                      resumes the lira transfer once it settles.
+                    </p>
+                    <code className="block mt-1 p-2 rounded bg-neutral-50 border border-neutral-200 font-mono text-[10px] break-all text-neutral-800">
+                      {claimableBalanceId}
+                    </code>
+                    <a
+                      href={`https://stellar.expert/explorer/testnet/claimable-balance/${claimableBalanceId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-block mt-1 text-[11px] font-semibold text-amber-800 underline hover:text-amber-900"
+                    >
+                      View it on stellar.expert →
+                    </a>
+                  </>
+                ) : (
+                  <p className="text-[11px] text-neutral-600">
+                    The anchor has not published a claimable balance id yet. Keep this window open —
+                    it appears here as soon as it does.
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -973,7 +893,7 @@ export default function WithdrawModal({
                   </p>
                 </div>
                 <div className="text-2xl font-black text-emerald-900 tracking-tight">
-                  ₺{tryAmountDisplay} TRY
+                  {quotedTry ? `₺${quotedTry} TRY` : `${usdcAmountDisplay} USDC`}
                 </div>
               </div>
 
@@ -996,13 +916,14 @@ export default function WithdrawModal({
                         Bank Reference ID (external_transaction_id):
                       </p>
                       <p className="font-mono font-bold text-neutral-900 select-all text-xs sm:text-sm">
-                        {externalTxId}
+                        {externalTxId ?? "— not provided by the anchor"}
                       </p>
                     </div>
                     <button
                       type="button"
-                      onClick={() => handleCopyBankRef(externalTxId)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-neutral-700 bg-neutral-100 hover:bg-neutral-200 rounded transition-colors self-start sm:self-auto cursor-pointer"
+                      disabled={!externalTxId}
+                      onClick={() => externalTxId && handleCopyBankRef(externalTxId)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-neutral-700 bg-neutral-100 hover:bg-neutral-200 disabled:opacity-40 rounded transition-colors self-start sm:self-auto cursor-pointer"
                     >
                       {copiedBankRef ? <CheckIcon className="h-3.5 w-3.5 text-emerald-600" /> : <CopyIcon className="h-3.5 w-3.5" />}
                       <span>{copiedBankRef ? "Copied" : "Copy"}</span>
@@ -1012,7 +933,7 @@ export default function WithdrawModal({
                   <div className="grid grid-cols-2 gap-2 text-[11px] text-neutral-600 pt-1">
                     <div>
                       <span className="text-neutral-400">Anchor Tx ID:</span>
-                      <p className="font-mono font-semibold text-neutral-800 truncate">{anchorTxId}</p>
+                      <p className="font-mono font-semibold text-neutral-800 truncate">{anchorTxId ?? "—"}</p>
                     </div>
                     <div>
                       <span className="text-neutral-400">Target IBAN:</span>
@@ -1080,7 +1001,10 @@ export default function WithdrawModal({
             </div>
           )}
 
-          {/* Interactive Rehearsal Bar (For judges and demo presentation) */}
+          {/* Rehearsal controls. Gated behind ?rehearsal=true: these buttons fabricate anchor
+              states, which is useful when practising the demo and misleading in front of anyone
+              else. Off by default so a production build never offers them. */}
+          {showRehearsalControls && (
           <div className="pt-2 border-t border-neutral-200">
             <details className="group text-xs text-neutral-500">
               <summary className="cursor-pointer font-semibold hover:text-neutral-800 flex items-center justify-between select-none">
@@ -1180,6 +1104,7 @@ export default function WithdrawModal({
               </div>
             </details>
           </div>
+          )}
         </div>
 
         {/* Footer Actions */}
