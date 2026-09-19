@@ -104,6 +104,21 @@ export function cacheDemoEndpoint(
      ON CONFLICT(id) DO UPDATE SET stellar_address = excluded.stellar_address`,
   ).run(DEMO_SELLER_ID, DEMO_PRIVY_USER_ID, sellerAddress);
 
+  // `proxy_slug` is UNIQUE, and every run registers a NEW endpoint_id because the
+  // contract's counter never reuses one. So when DEMO_PROXY_SLUG is pinned — which
+  // .env.example invites, to keep the demo URL stable across rehearsals — the
+  // second run would collide on the slug rather than on the id, and ON CONFLICT(id)
+  // does not catch that.
+  //
+  // Retire the older row instead of deleting it: `calls` rows reference
+  // `endpoints(id)`, so a delete would fail the foreign key as soon as the demo has
+  // been used once. Suffixing frees the slug, keeps the call history, and leaves
+  // the pinned slug pointing at the newest demo endpoint.
+  db.prepare(
+    `UPDATE endpoints SET proxy_slug = proxy_slug || '-retired-' || id
+     WHERE proxy_slug = ? AND id <> ?`,
+  ).run(proxySlug, String(endpointId));
+
   db.prepare(
     `INSERT INTO endpoints (id, seller_id, upstream_url, proxy_slug, price_stroops)
      VALUES (?, ?, ?, ?, ?)
