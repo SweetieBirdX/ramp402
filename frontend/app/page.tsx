@@ -1,10 +1,50 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth";
 
 export default function HomePage() {
-  const { ready, authenticated, email, stellarAddress, login, logout, isCreatingWallet } = useAuth();
+  const {
+    ready,
+    authenticated,
+    email,
+    stellarAddress,
+    getAccessToken,
+    login,
+    logout,
+    isCreatingWallet,
+    isBootstrapping,
+    isBootstrapped,
+    bootstrapError,
+    bootstrap,
+  } = useAuth();
+  const [copiedToken, setCopiedToken] = useState(false);
+  const [tokenLoading, setTokenLoading] = useState(false);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      (window as unknown as { getPrivyToken: typeof getAccessToken }).getPrivyToken = getAccessToken;
+    }
+  }, [getAccessToken]);
+
+  const handleCopyToken = async () => {
+    setTokenLoading(true);
+    try {
+      const token = await getAccessToken();
+      if (token) {
+        await navigator.clipboard.writeText(token);
+        setCopiedToken(true);
+        setTimeout(() => setCopiedToken(false), 2500);
+      } else {
+        alert("Token not available. Make sure you are logged in.");
+      }
+    } catch (err) {
+      console.error("Failed to copy token:", err);
+    } finally {
+      setTokenLoading(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -63,6 +103,44 @@ export default function HomePage() {
                       </code>
                     ) : (
                       <span className="text-xs text-neutral-400 font-mono">None detected</span>
+                    )}
+                  </div>
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="text-xs text-neutral-500 font-medium">Privy Token:</span>
+                    <button
+                      type="button"
+                      onClick={handleCopyToken}
+                      disabled={tokenLoading}
+                      className="inline-flex items-center px-2.5 py-1 border border-neutral-300 text-xs font-medium rounded-md bg-white hover:bg-neutral-100 text-neutral-800 transition-colors cursor-pointer"
+                    >
+                      {copiedToken ? "✓ Copied to Clipboard!" : tokenLoading ? "Retrieving..." : "📋 Copy Access Token"}
+                    </button>
+                  </div>
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="text-xs text-neutral-500 font-medium">Gateway Seller Status:</span>
+                    {isBootstrapping ? (
+                      <span className="text-xs text-amber-600 font-mono animate-pulse">
+                        Bootstrapping via Friendbot (~6s)...
+                      </span>
+                    ) : isBootstrapped ? (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-100 text-emerald-800">
+                        ✓ Bootstrapped &amp; Funded
+                      </span>
+                    ) : bootstrapError ? (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-red-600 font-mono">
+                          {bootstrapError}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => bootstrap()}
+                          className="text-xs text-neutral-700 underline hover:text-neutral-900 cursor-pointer"
+                        >
+                          Retry
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-neutral-400 font-mono">Waiting for wallet</span>
                     )}
                   </div>
                 </div>

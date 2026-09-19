@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useCreateWallet } from "@privy-io/react-auth/extended-chains";
 
@@ -31,6 +31,10 @@ export interface AuthState {
   login: () => void;
   logout: () => Promise<void>;
   isCreatingWallet: boolean;
+  isBootstrapping: boolean;
+  isBootstrapped: boolean;
+  bootstrapError: string | null;
+  bootstrap: () => Promise<boolean>;
 }
 
 export function useAuth(): AuthState {
@@ -91,6 +95,89 @@ export function useAuth(): AuthState {
     };
   }, [ready, authenticated, user, stellarAddress, isCreatingWallet, createWallet]);
 
+  const [isBootstrapping, setIsBootstrapping] = useState(false);
+  const [isBootstrapped, setIsBootstrapped] = useState(false);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+
+  const bootstrap = useCallback(async (): Promise<boolean> => {
+    if (!ready || !authenticated || !stellarAddress) return false;
+    setIsBootstrapping(true);
+    setBootstrapError(null);
+
+    let attempts = 0;
+    while (attempts < 3) {
+      attempts++;
+      try {
+        const { bootstrapSeller } = await import("./api");
+        await bootstrapSeller();
+        setIsBootstrapped(true);
+        return true;
+      } catch (err: unknown) {
+        // If 409 (embedded wallet not yet indexed by Privy server), wait 1.5s and retry
+        const is409 =
+          typeof err === "object" &&
+          err !== null &&
+          "status" in err &&
+          (err as { status: unknown }).status === 409;
+        if (is409 && attempts < 3) {
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        const msg = err instanceof Error ? err.message : "Bootstrap failed";
+        setBootstrapError(msg);
+        return false;
+      } finally {
+        if (attempts >= 3 || isBootstrapped) {
+          setIsBootstrapping(false);
+        }
+      }
+    }
+    setIsBootstrapping(false);
+    return false;
+  }, [ready, authenticated, stellarAddress, isBootstrapped]);
+
+  // Auto-call bootstrap once stellarAddress has appeared
+  useEffect(() => {
+    let active = true;
+
+    if (
+      ready &&
+      authenticated &&
+      stellarAddress &&
+      !isCreatingWallet &&
+      !isBootstrapped &&
+      !isBootstrapping &&
+      !bootstrapError
+    ) {
+      (async () => {
+        await Promise.resolve();
+        if (!active) return;
+        await bootstrap();
+      })();
+    }
+
+    return () => {
+      active = false;
+    };
+  }, [
+    ready,
+    authenticated,
+    stellarAddress,
+    isCreatingWallet,
+    isBootstrapped,
+    isBootstrapping,
+    bootstrapError,
+    bootstrap,
+  ]);
+
+  const handleLogout = useCallback(async () => {
+    setCreatedAddress(null);
+    setIsBootstrapped(false);
+    setIsBootstrapping(false);
+    setBootstrapError(null);
+    await logout();
+  }, [logout]);
+
   return {
     ready,
     authenticated,
@@ -99,7 +186,11 @@ export function useAuth(): AuthState {
     user,
     email,
     login,
-    logout,
+    logout: handleLogout,
     isCreatingWallet,
+    isBootstrapping,
+    isBootstrapped,
+    bootstrapError,
+    bootstrap,
   };
 }

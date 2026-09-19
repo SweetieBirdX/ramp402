@@ -8,7 +8,17 @@ import { stroopsToDisplay } from "@/lib/format";
 import type { EndpointSummary, GetBalanceResponse } from "@/lib/types";
 
 export default function DashboardPage() {
-  const { ready, authenticated, stellarAddress, email } = useAuth();
+  const {
+    ready,
+    authenticated,
+    stellarAddress,
+    email,
+    isCreatingWallet,
+    isBootstrapping,
+    isBootstrapped,
+    bootstrapError,
+    bootstrap,
+  } = useAuth();
   const router = useRouter();
 
   const [balance, setBalance] = useState<GetBalanceResponse | null>(null);
@@ -49,7 +59,7 @@ export default function DashboardPage() {
       return;
     }
 
-    if (ready && authenticated) {
+    if (ready && authenticated && stellarAddress && !isBootstrapping) {
       let isSubscribed = true;
 
       const runInitialFetch = async () => {
@@ -88,8 +98,9 @@ export default function DashboardPage() {
         isSubscribed = false;
       };
     }
-  }, [ready, authenticated, router]);
+  }, [ready, authenticated, stellarAddress, isBootstrapping, isBootstrapped, router]);
 
+  // Loading view while checking auth
   if (!ready || !authenticated) {
     return (
       <div className="space-y-6">
@@ -102,8 +113,76 @@ export default function DashboardPage() {
     );
   }
 
+  // Loading view while provisioning wallet
+  if (isCreatingWallet || (!stellarAddress && !bootstrapError)) {
+    return (
+      <div className="space-y-6">
+        <div className="h-8 w-64 bg-neutral-200 animate-pulse rounded-md" />
+        <div className="p-12 text-center border border-neutral-200 bg-white rounded-lg space-y-3">
+          <div className="inline-block h-7 w-7 border-2 border-neutral-300 border-t-neutral-900 rounded-full animate-spin" />
+          <h3 className="text-base font-semibold text-neutral-900">Provisioning Embedded Stellar Wallet</h3>
+          <p className="text-sm text-neutral-500 max-w-md mx-auto">
+            Creating non-custodial Ed25519 keypair for your account. Please wait a moment...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // Loading view during the 6-second Friendbot bootstrap
+  if (isBootstrapping) {
+    return (
+      <div className="space-y-6">
+        <div className="h-8 w-64 bg-neutral-200 animate-pulse rounded-md" />
+        <div className="p-12 text-center border border-neutral-200 bg-white rounded-lg space-y-3">
+          <div className="inline-block h-7 w-7 border-2 border-neutral-300 border-t-neutral-900 rounded-full animate-spin" />
+          <h3 className="text-base font-semibold text-neutral-900">Bootstrapping Seller Account</h3>
+          <p className="text-sm text-neutral-600 max-w-md mx-auto">
+            Registering your Stellar address on the gateway and funding it via Friendbot on testnet.
+          </p>
+          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-50 border border-amber-200 text-xs font-medium text-amber-800">
+            <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
+            First login initialization takes ~6 seconds...
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const renderError = (err: ApiError | Error) => {
     if (err instanceof ApiError) {
+      if (err.status === 403) {
+        return (
+          <div className="rounded-lg bg-amber-50 border border-amber-300 p-4 text-xs text-amber-900 space-y-2">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2 font-semibold">
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-bold bg-amber-200 text-amber-900">
+                  403 Forbidden
+                </span>
+                <span>Seller Account Not Bootstrapped</span>
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  const ok = await bootstrap();
+                  if (ok) fetchDashboardData();
+                }}
+                disabled={isBootstrapping}
+                className="px-3 py-1 bg-amber-800 hover:bg-amber-900 text-white rounded font-medium text-xs shadow-xs transition-colors cursor-pointer disabled:opacity-50 self-start sm:self-auto"
+              >
+                {isBootstrapping ? "Bootstrapping (~6s)..." : "Bootstrap Account"}
+              </button>
+            </div>
+            <p className="text-amber-800">
+              Gateway message: <code className="font-mono bg-amber-100/70 px-1 py-0.5 rounded text-amber-950">{err.message}</code>
+            </p>
+            <p className="text-neutral-600 text-[11px]">
+              The read routes require an initialized seller record in the database. Click &quot;Bootstrap Account&quot; to register your address and fund it via Friendbot.
+            </p>
+          </div>
+        );
+      }
+
       return (
         <div className="rounded-md bg-amber-50 border border-amber-200 p-4 text-xs text-amber-900">
           <div className="flex items-center gap-2 font-semibold">
@@ -128,6 +207,10 @@ export default function DashboardPage() {
     );
   };
 
+  const totalCalls = endpoints
+    ? endpoints.reduce((sum, ep) => sum + (ep.call_count || 0), 0)
+    : 0;
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -144,6 +227,11 @@ export default function DashboardPage() {
             <code className="font-mono bg-white px-2 py-0.5 border border-neutral-200 rounded text-neutral-800">
               {stellarAddress || "Pending creation..."}
             </code>
+            {isBootstrapped ? (
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-emerald-100 text-emerald-800">
+                ✓ Bootstrapped &amp; Funded
+              </span>
+            ) : null}
           </div>
         </div>
 
@@ -151,8 +239,8 @@ export default function DashboardPage() {
           <button
             type="button"
             onClick={() => fetchDashboardData()}
-            disabled={isLoadingData}
-            className="inline-flex items-center px-3 py-2 border border-neutral-300 text-xs font-medium rounded-md text-neutral-700 bg-white hover:bg-neutral-50 disabled:opacity-50"
+            disabled={isLoadingData || isBootstrapping}
+            className="inline-flex items-center px-3 py-2 border border-neutral-300 text-xs font-medium rounded-md text-neutral-700 bg-white hover:bg-neutral-50 disabled:opacity-50 transition-colors"
           >
             {isLoadingData ? "Fetching..." : "Refresh Data"}
           </button>
@@ -222,7 +310,15 @@ export default function DashboardPage() {
           <p className="text-xs font-medium text-neutral-500 uppercase tracking-wider">
             Total Calls Served
           </p>
-          <p className="mt-2 text-3xl font-bold text-neutral-900">0</p>
+          {isLoadingData ? (
+            <div className="mt-2 h-9 w-16 bg-neutral-100 animate-pulse rounded" />
+          ) : endpointsError ? (
+            <p className="mt-2 text-3xl font-bold text-neutral-400">—</p>
+          ) : (
+            <p className="mt-2 text-3xl font-bold text-neutral-900">
+              {totalCalls.toLocaleString()}
+            </p>
+          )}
           <p className="mt-1 text-xs text-neutral-500 font-mono">Paid via x402</p>
         </div>
       </div>
@@ -243,7 +339,13 @@ export default function DashboardPage() {
               <div key={ep.endpoint_id} className="py-3 flex items-center justify-between">
                 <div>
                   <p className="text-sm font-semibold text-neutral-900">{ep.upstream_url}</p>
-                  <p className="text-xs text-neutral-500 font-mono">Slug: {ep.proxy_slug}</p>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <p className="text-xs text-neutral-500 font-mono">Slug: {ep.proxy_slug}</p>
+                    <span className="text-neutral-300">&bull;</span>
+                    <span className="text-xs px-2 py-0.5 bg-neutral-100 rounded-full font-mono text-neutral-700">
+                      {ep.call_count ?? 0} {ep.call_count === 1 ? "call" : "calls"}
+                    </span>
+                  </div>
                 </div>
                 <div className="text-right">
                   <p className="text-sm font-bold text-neutral-900">
