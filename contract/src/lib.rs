@@ -96,3 +96,6 @@ impl RampLedger {
         todo!()
     }
 }
+
+#[cfg(test)]
+mod test;
