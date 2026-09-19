@@ -25,6 +25,11 @@ immediately afterwards.
 - **Status enums** (`calls.status`, `withdrawals.status`) are exactly:
   `paid | upstream_failed | refunded` and `pending | completed | failed`.
   A new status name must be added to this document first.
+  These are **our lifecycle**, not the anchor's. An anchor's SEP-6 transaction status
+  (`pending_trust`, `pending_user_transfer_start`, …) is a much longer and anchor-defined list; it
+  is surfaced **alongside** `withdrawals.status` in its own field, never merged into this enum. A
+  withdrawal waiting on a trustline is still `pending` — that is what it is, from the seller's point
+  of view — and the reason is carried separately. See §1.3.
 - **Errors**: the gateway returns `{ "error": "<machine_code>", "message": "<human text>" }` with
   the appropriate HTTP status. Machine codes used across components:
   `missing_budget_header`, `budget_exceeded`, `endpoint_not_found`, `upstream_failed`,
@@ -197,7 +202,27 @@ the gateway builds an unsigned transaction and the frontend returns it signed.
   then kicks off the SEP-10 / SEP-38 / SEP-12 / SEP-6 + classic payment flow **in the background**
   → returns `{ withdrawal_id, status: "pending" }` immediately
 - `GET /api/withdrawals/:id` — for polling:
-  `{ status: "pending"|"completed"|"failed", anchor_tx_id?, external_transaction_id? }`
+
+  ```ts
+  {
+    status: "pending" | "completed" | "failed",  // OUR lifecycle (§1.1). Always present.
+    anchor_status?: string,        // the anchor's own SEP-6 status, passed through verbatim
+    anchor_tx_id?: string,         // the anchor's transaction id
+    external_transaction_id?: string,  // the id on the external rail, e.g. the bank reference
+    claimable_balance_id?: string, // present when the anchor sent a claimable balance
+    amount_stroops?: number,
+    error_message?: string         // human text, when status is "failed"
+  }
+  ```
+
+  **`status` stays at three values and never carries a SEP-6 name.** A withdrawal blocked on a
+  missing trustline is `status: "pending"` with `anchor_status: "pending_trust"` and, once the
+  anchor issues one, a `claimable_balance_id` for the UI to build a claim path from. A client that
+  ignores the optional fields still shows "pending", which is true — it just cannot offer the claim.
+
+  `anchor_status` is a **passthrough string, not an enum of ours.** It is whatever the anchor
+  returned. Do not narrow it to a fixed union in a way that breaks on an unrecognised value: render
+  unknown statuses as a generic "in progress" rather than falling through to nothing.
 
 ### Read endpoints
 
@@ -277,6 +302,10 @@ CREATE TABLE IF NOT EXISTS withdrawals (
   seller_id TEXT NOT NULL REFERENCES sellers(id),
   amount_stroops INTEGER NOT NULL,
   anchor_tx_id TEXT,
+  anchor_status TEXT,              -- the anchor's SEP-6 status, verbatim; NULL before it answers
+  external_transaction_id TEXT,    -- the id on the external rail, e.g. the bank reference
+  claimable_balance_id TEXT,       -- set when a missing trustline produced a claimable balance
+  error_message TEXT,              -- why it failed, when status is 'failed'
   status TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -330,6 +359,8 @@ These come from known failure modes. Each one has cost someone a debugging sessi
 - The 1 USDC withdrawal limit is a **lower bound, not a cap**. Reject amounts below it with a clear
   message; never silently clamp to it.
 - If a trustline is missing, the resulting `pending_trust` / claimable-balance state must be
-  surfaced in the withdrawal status so the UI can show a claim path.
+  surfaced so the UI can show a claim path — as `anchor_status` and `claimable_balance_id` on
+  `GET /api/withdrawals/:id`, **not** as a fourth value of `withdrawals.status`, which stays at the
+  three in §1.1. The withdrawal is still `pending`; the trustline is the reason, not the state.
 - Code that only works against the mock anchor (e.g. `simulate-bank-transfer`) is isolated in its
   own module and marked `// MOCK ANCHOR ONLY`.
