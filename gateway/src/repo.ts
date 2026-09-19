@@ -2,9 +2,9 @@
 // amounts are integer stroops and endpoints.id is the decimal string of the contract's u64 (§1.1).
 import { nanoid } from "nanoid";
 import type { DbHandle } from "./db.js";
+import type { CallStatus, WithdrawalStatus } from "./types.js";
 
-export type CallStatus = "paid" | "upstream_failed" | "refunded";
-export type WithdrawalStatus = "pending" | "completed" | "failed";
+export type { CallStatus, WithdrawalStatus };
 
 export interface SellerRow {
   id: string;
