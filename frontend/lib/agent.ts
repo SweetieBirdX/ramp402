@@ -63,6 +63,7 @@ export interface CallResult {
   rejectedTxHash?: string | null;
   upstreamFailedMessage?: string;
   budgetExceededMessage?: string;
+  missingBudgetHeaderMessage?: string;
   errorMessage?: string;
   upstreamBody?: unknown;
 }
@@ -241,8 +242,9 @@ export async function executeX402Call(params: {
   agent: AgentAccount;
   budgetStroops: number;
   isFirstCall?: boolean;
+  omitBudgetHeader?: boolean;
 }): Promise<CallResult> {
-  const { slug, agent, budgetStroops } = params;
+  const { slug, agent, budgetStroops, omitBudgetHeader } = params;
   const exchanges: HttpExchangeLog[] = [];
 
   // =========================================================================
@@ -250,8 +252,10 @@ export async function executeX402Call(params: {
   // =========================================================================
   const probeHeaders: Record<string, string> = {
     Accept: "application/json",
-    "X-Agent-Budget": String(budgetStroops),
   };
+  if (!omitBudgetHeader) {
+    probeHeaders["X-Agent-Budget"] = String(budgetStroops);
+  }
 
   const t1 = Date.now();
   const probeRes = await callProxy(slug, probeHeaders);
@@ -293,7 +297,7 @@ export async function executeX402Call(params: {
     method: "GET",
     url: `/proxy/${slug}`,
     status: probeRes.status,
-    statusText: probeRes.statusText || (probeRes.status === 402 ? "Payment Required" : ""),
+    statusText: probeRes.statusText || (probeRes.status === 402 ? "Payment Required" : probeRes.status === 400 ? "Bad Request" : ""),
     headersSent: probeHeaders,
     headersReceived: probeResHeaders,
     decodedPaymentRequired,
@@ -302,11 +306,24 @@ export async function executeX402Call(params: {
   });
 
   if (probeRes.status !== 402 || !paymentRequiredHeader || !decodedPaymentRequired) {
+    const errorBody =
+      probeBody && typeof probeBody === "object"
+        ? (probeBody as { error?: string; message?: string })
+        : null;
+    const isMissingBudget =
+      errorBody?.error === "missing_budget_header" || probeRes.status === 400;
+
     return {
       success: false,
       status: probeRes.status,
       exchanges,
-      errorMessage: `Expected 402 Payment Required with PAYMENT-REQUIRED header, got status ${probeRes.status}`,
+      missingBudgetHeaderMessage: isMissingBudget
+        ? errorBody?.message ||
+          "Mandatory X-Agent-Budget header was omitted. The gateway refused execution to prevent unbounded agent spend."
+        : undefined,
+      errorMessage: isMissingBudget
+        ? "Missing mandatory X-Agent-Budget header: The gateway blocked the call to protect the agent before payment."
+        : `Expected 402 Payment Required with PAYMENT-REQUIRED header, got status ${probeRes.status}`,
     };
   }
 
@@ -368,8 +385,10 @@ export async function executeX402Call(params: {
   const retryHeaders: Record<string, string> = {
     Accept: "application/json",
     "PAYMENT-SIGNATURE": paymentSignatureHeader,
-    "X-Agent-Budget": String(budgetStroops),
   };
+  if (!omitBudgetHeader) {
+    retryHeaders["X-Agent-Budget"] = String(budgetStroops);
+  }
 
   const t2 = Date.now();
   const retryRes = await callProxy(slug, retryHeaders);

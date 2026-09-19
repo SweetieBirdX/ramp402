@@ -86,151 +86,151 @@ export interface Sep6StatusMeta {
 export const SEP6_STATUS_CONFIG: Record<Sep6Status, Sep6StatusMeta> = {
   pending_user_transfer_start: {
     code: "pending_user_transfer_start",
-    label: "Stellar Transferi Başlatılıyor",
+    label: "Initiating Stellar Transfer",
     badgeBg: "bg-amber-100",
     badgeText: "text-amber-800",
     stepIndex: 1,
-    description: "Anchor hesabına USDC transferi başlatıldı. İşlem ağ üzerinde teyit ediliyor.",
+    description: "USDC withdrawal transfer initiated to anchor account. Awaiting on-chain ledger confirmation.",
     isTerminal: false,
     isError: false,
   },
   pending_user_transfer_complete: {
     code: "pending_user_transfer_complete",
-    label: "Transfer Alındı",
+    label: "Transfer Received by Anchor",
     badgeBg: "bg-amber-100",
     badgeText: "text-amber-800",
     stepIndex: 1,
-    description: "Anchor USDC fonlarını teslim aldı, döviz kur takası hazırlanıyor.",
+    description: "Anchor received USDC from the contract balance; preparing fiat FX conversion.",
     isTerminal: false,
     isError: false,
   },
   pending_anchor: {
     code: "pending_anchor",
-    label: "Anchor TRY Dönüşümü Yapıyor",
+    label: "Anchor TRY Conversion",
     badgeBg: "bg-blue-100",
     badgeText: "text-blue-800",
     stepIndex: 2,
-    description: "Anchor SEP-10 kimliğini ve SEP-38 döviz kurunu doğruluyor. Türk Lirası takas emri oluşturuldu.",
+    description: "Anchor authenticating SEP-10 identity and locking SEP-38 FX rate (USDC → TRY).",
     isTerminal: false,
     isError: false,
   },
   pending_stellar: {
     code: "pending_stellar",
-    label: "Stellar Konsensüsü Bekleniyor",
+    label: "Awaiting Stellar Consensus",
     badgeBg: "bg-blue-100",
     badgeText: "text-blue-800",
     stepIndex: 2,
-    description: "Stellar blokzincirinde ödeme ve sözleşme durumunun kesinleşmesi bekleniyor.",
+    description: "Waiting for ledger consensus confirmation on the Stellar network.",
     isTerminal: false,
     isError: false,
   },
   pending_external: {
     code: "pending_external",
-    label: "Banka / FAST İletimi Bekleniyor",
+    label: "Awaiting Bank FAST Clearing",
     badgeBg: "bg-indigo-100",
     badgeText: "text-indigo-800",
     stepIndex: 3,
-    description: "Anchor Türk Lirası transferini TCMB FAST bankacılık ağına iletti. Alıcı bankanın onayı bekleniyor.",
+    description: "Anchor dispatched Turkish Lira wire to TCMB FAST network. Awaiting receiving bank confirmation.",
     isTerminal: false,
     isError: false,
   },
   completed: {
     code: "completed",
-    label: "Tamamlandı (Banka Hesabına Aktarıldı)",
+    label: "Completed (Fiat Dispatched)",
     badgeBg: "bg-emerald-100",
     badgeText: "text-emerald-800",
     stepIndex: 4,
-    description: "Türk Lirası banka hesabınıza başarıyla yatırıldı. Banka dekont/referans numarası oluşturuldu.",
+    description: "Turkish Lira successfully deposited into bank account. FAST external transaction reference confirmed.",
     isTerminal: true,
     isError: false,
   },
   pending_trust: {
     code: "pending_trust",
-    label: "Trustline / Hak Talebi Bekleniyor",
+    label: "Action Required: Missing Trustline (pending_trust)",
     badgeBg: "bg-amber-100",
     badgeText: "text-amber-800",
     stepIndex: 2,
-    description: "Anchor TRY bakiyesi için hesabınızda güven hattı bulamadı ve tutarı Stellar Hak Talebi (Claimable Balance) olarak kilitledi.",
+    description: "Anchor found no trustline for recipient asset. Funds secured as a Stellar Claimable Balance.",
     isTerminal: false,
     isError: false,
   },
   pending_user: {
     code: "pending_user",
-    label: "Kullanıcı Onayı Gerekli",
+    label: "User Verification Required",
     badgeBg: "bg-amber-100",
     badgeText: "text-amber-800",
     stepIndex: 2,
-    description: "Anchor işlemi tamamlayabilmek için ek KYC veya IBAN teyidi bekliyor.",
+    description: "Anchor requires additional KYC or IBAN confirmation before releasing funds.",
     isTerminal: false,
     isError: false,
   },
   error: {
     code: "error",
-    label: "İşlem Hatası",
+    label: "Anchor Service Error",
     badgeBg: "bg-red-100",
     badgeText: "text-red-800",
     stepIndex: 3,
-    description: "Anchor veya bankacılık altyapısında teknik bir hata meydana geldi.",
+    description: "The anchor or banking infrastructure encountered an unexpected technical error.",
     isTerminal: true,
     isError: true,
   },
   failed: {
     code: "failed",
-    label: "Çekim Başarısız",
+    label: "Withdrawal Failed / Rejected",
     badgeBg: "bg-red-100",
     badgeText: "text-red-800",
     stepIndex: 3,
-    description: "Banka hesabı veya anchor kuralları gereği transfer reddedildi.",
+    description: "The recipient bank or anchor compliance checks rejected the wire (e.g., account holder name mismatch).",
     isTerminal: true,
     isError: true,
   },
   refunded: {
     code: "refunded",
-    label: "İade Edildi",
+    label: "Funds Refunded",
     badgeBg: "bg-neutral-100",
     badgeText: "text-neutral-800",
     stepIndex: 3,
-    description: "Transfer gerçekleştirilemediği için USDC tutarı hesabınıza iade edildi.",
+    description: "Wire could not be completed; USDC returned to your Stellar account balance.",
     isTerminal: true,
     isError: false,
   },
   expired: {
     code: "expired",
-    label: "Zaman Aşımı",
+    label: "Transaction Expired",
     badgeBg: "bg-neutral-100",
     badgeText: "text-neutral-800",
     stepIndex: 3,
-    description: "İşlem süresi dolduğu için transfer sonlandırıldı.",
+    description: "The off-ramp transaction expired before required steps were confirmed.",
     isTerminal: true,
     isError: true,
   },
   no_market: {
     code: "no_market",
-    label: "Piyasa Kapalı",
+    label: "Market Unavailable (no_market)",
     badgeBg: "bg-red-100",
     badgeText: "text-red-800",
     stepIndex: 2,
-    description: "USDC → TRY dönüşümü için likidite bulunamadı.",
+    description: "Insufficient liquidity or trading pair temporarily unavailable for USDC → TRY conversion.",
     isTerminal: true,
     isError: true,
   },
   too_small: {
     code: "too_small",
-    label: "Tutar Limit Altı",
+    label: "Amount Below Limit (too_small)",
     badgeBg: "bg-amber-100",
     badgeText: "text-amber-800",
     stepIndex: 1,
-    description: "Çekim tutarı minimum 1.00 USDC limitinin altındadır.",
+    description: "The requested withdrawal amount is below the anchor's minimum limit (1.00 USDC).",
     isTerminal: true,
     isError: true,
   },
   too_large: {
     code: "too_large",
-    label: "Tutar Limit Üstü",
+    label: "Amount Exceeds Limit (too_large)",
     badgeBg: "bg-amber-100",
     badgeText: "text-amber-800",
     stepIndex: 1,
-    description: "Çekim tutarı anchor tekil işlem limitini aşıyor.",
+    description: "The requested withdrawal amount exceeds the anchor's maximum single transaction limit.",
     isTerminal: true,
     isError: true,
   },
@@ -543,10 +543,23 @@ export default function WithdrawModal({
           return;
         }
 
-        if (resolvedStatus === "error" || resolvedStatus === "failed") {
+        if (
+          resolvedStatus === "error" ||
+          resolvedStatus === "failed" ||
+          resolvedStatus === "expired" ||
+          resolvedStatus === "no_market" ||
+          resolvedStatus === "too_small" ||
+          resolvedStatus === "too_large" ||
+          resolvedStatus === "refunded"
+        ) {
           stopPolling();
           setFlowState("error");
-          setErrorMessage(pollRes.error_message || pollRes.message || "Banka FAST ağı transferi reddetti.");
+          setErrorMessage(
+            pollRes.error_message ||
+              pollRes.message ||
+              SEP6_STATUS_CONFIG[resolvedStatus]?.description ||
+              "Off-ramp transfer could not be completed."
+          );
           return;
         }
       } catch {
@@ -644,9 +657,27 @@ export default function WithdrawModal({
       onSuccess?.(record);
     } else if (status === "pending_trust") {
       setFlowState("pending_trust");
-    } else if (status === "error" || status === "failed") {
+    } else if (status === "error") {
       setFlowState("error");
-      setErrorMessage("FAST Banka Takası Hatası: Alıcı IBAN ile ad-soyad uyuşmazlığı nedeniyle ödeme durduruldu (Kod: TCMB_FAST_REJECT).");
+      setErrorMessage("Anchor Infrastructure Error: The off-ramp service experienced a gateway timeout (SEP-6 HTTP 504).");
+    } else if (status === "failed") {
+      setFlowState("error");
+      setErrorMessage("FAST Banking Clearing Error: Recipient name does not match the legal account holder on file with IBAN (TCMB_FAST_NAME_MISMATCH).");
+    } else if (status === "no_market") {
+      setFlowState("error");
+      setErrorMessage("Exchange Liquidity Error: Insufficient market depth for USDC → TRY conversion on SEP-38 anchor.");
+    } else if (status === "expired") {
+      setFlowState("error");
+      setErrorMessage("Quote Expired: SEP-38 exchange rate quote expired before user transaction confirmation.");
+    } else if (status === "too_small") {
+      setFlowState("error");
+      setErrorMessage("Amount Below Limit: Minimum withdrawal amount is 1.00 USDC (10,000,000 stroops).");
+    } else if (status === "too_large") {
+      setFlowState("error");
+      setErrorMessage("Amount Exceeds Limit: Maximum single withdrawal limit is 10,000.00 USDC for unverified tiers.");
+    } else if (status === "refunded") {
+      setFlowState("error");
+      setErrorMessage("Transfer Refunded: Transaction cancelled by compliance; USDC has been credited back to your balance.");
     } else {
       setFlowState("polling");
     }
@@ -673,10 +704,10 @@ export default function WithdrawModal({
             </div>
             <div>
               <h2 id={modalTitleId} className="text-base font-bold text-neutral-900 tracking-tight">
-                TL&apos;ye Çekim (Withdraw to TRY)
+                Withdraw to Turkish Lira (TRY)
               </h2>
               <p className="text-xs text-neutral-500">
-                Stellar Anchor SEP-6 / SEP-10 / SEP-38 Off-Ramp
+                Stellar Anchor SEP-6 / SEP-10 / SEP-38 Off-Ramp via TCMB FAST
               </p>
             </div>
           </div>
@@ -684,7 +715,7 @@ export default function WithdrawModal({
             type="button"
             onClick={handleClose}
             className="p-1 rounded-md text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 transition-colors cursor-pointer"
-            aria-label="Kapat"
+            aria-label="Close"
           >
             <svg className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
@@ -697,7 +728,7 @@ export default function WithdrawModal({
           {/* Progress Tracker (Status Machine) */}
           <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-3.5 space-y-3">
             <div className="flex items-center justify-between text-xs font-semibold text-neutral-600">
-              <span>Anchor İşlem Hattı (SEP-6 State Machine)</span>
+              <span>Anchor Pipeline (SEP-6 State Machine)</span>
               <span className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-bold ${currentMeta.badgeBg} ${currentMeta.badgeText}`}>
                 {currentMeta.code}
               </span>
@@ -706,10 +737,10 @@ export default function WithdrawModal({
             {/* Stepper Pipeline */}
             <div className="grid grid-cols-4 gap-2 pt-1">
               {[
-                { step: 1, label: "1. Sözleşme", sub: "Soroban withdraw()" },
-                { step: 2, label: "2. Anchor", sub: "SEP-10 & Kur" },
-                { step: 3, label: "3. FAST Takas", sub: "Banka İletimi" },
-                { step: 4, label: "4. Tamamlandı", sub: "Fiat Transferi" },
+                { step: 1, label: "1. Contract", sub: "Soroban withdraw()" },
+                { step: 2, label: "2. Anchor", sub: "SEP-10 & FX Rate" },
+                { step: 3, label: "3. FAST Wire", sub: "Bank Clearing" },
+                { step: 4, label: "4. Completed", sub: "Fiat Settled" },
               ].map((s) => {
                 const isPassed =
                   flowState === "completed" ||
@@ -761,16 +792,16 @@ export default function WithdrawModal({
               {/* Summary Card */}
               <div className="grid grid-cols-2 gap-4 p-4 rounded-lg bg-emerald-50/60 border border-emerald-200 text-emerald-950">
                 <div>
-                  <p className="text-xs text-emerald-700 font-medium">Çekilecek Bakiye (USDC)</p>
+                  <p className="text-xs text-emerald-700 font-medium">Balance to Withdraw (USDC)</p>
                   <p className="text-2xl font-extrabold tracking-tight mt-0.5">{usdcAmountDisplay} USDC</p>
                   <p className="text-[11px] text-emerald-600 font-mono mt-0.5">
                     {balanceStroops.toLocaleString()} stroops
                   </p>
                 </div>
                 <div className="border-l border-emerald-200 pl-4">
-                  <p className="text-xs text-emerald-700 font-medium">Tahmini TRY Karşılığı</p>
+                  <p className="text-xs text-emerald-700 font-medium">Estimated Fiat Payout</p>
                   <p className="text-2xl font-extrabold tracking-tight mt-0.5 text-emerald-900">
-                    ₺{tryAmountDisplay}
+                    ₺{tryAmountDisplay} TRY
                   </p>
                   <p className="text-[11px] text-emerald-600 mt-0.5">
                     1 USDC ≈ {ESTIMATED_TRY_RATE.toFixed(2)} TRY (SEP-38)
@@ -783,15 +814,15 @@ export default function WithdrawModal({
                 <div className="p-3.5 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs flex items-start gap-2.5">
                   <AlertTriangleIcon className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
                   <div>
-                    <span className="font-bold">Çekim Limiti Uyarısı: </span>
-                    Anchor off-ramp protokolü (SEP-6) en az <strong>1.00 USDC</strong> (10.000.000 stroops) çekim tutarı gerektirmektedir. Mevcut bakiyeniz ({usdcAmountDisplay} USDC) bu limitin altındadır.
+                    <span className="font-bold">Minimum Amount Warning: </span>
+                    Stellar anchor off-ramp (SEP-6) requires a minimum withdrawal of <strong>1.00 USDC</strong> (10,000,000 stroops). Your current balance ({usdcAmountDisplay} USDC) is below this requirement.
                   </div>
                 </div>
               ) : (
                 <div className="p-3 rounded-lg bg-neutral-50 border border-neutral-200 text-xs text-neutral-600 flex items-center justify-between">
-                  <span className="font-medium text-neutral-800">Minimum Çekim Şartı: 1.00 USDC</span>
+                  <span className="font-medium text-neutral-800">Minimum Off-Ramp: 1.00 USDC</span>
                   <span className="inline-flex items-center text-emerald-700 font-bold gap-1 text-[11px]">
-                    ✓ Limit Karşılandı
+                    ✓ Limit Met
                   </span>
                 </div>
               )}
@@ -800,7 +831,7 @@ export default function WithdrawModal({
               <div className="space-y-4">
                 <div>
                   <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                    Alıcı IBAN (TR)
+                    Recipient IBAN (TR)
                   </label>
                   <div className="relative">
                     <input
@@ -813,19 +844,19 @@ export default function WithdrawModal({
                     <BuildingBankIcon className="absolute right-3 top-2.5 h-4 w-4 text-neutral-400 pointer-events-none" />
                   </div>
                   <p className="text-[11px] text-neutral-500 mt-1">
-                    Banka transferi Türkiye Cumhuriyet Merkez Bankası (FAST) ağı üzerinden 7/24 anlık gerçekleşir.
+                    Direct bank wire via TCMB FAST network with instant 24/7 settlement.
                   </p>
                 </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                    Hesap Sahibi Adı Soyadı
+                    Account Holder Legal Name
                   </label>
                   <input
                     type="text"
                     value={recipientName}
                     onChange={(e) => setRecipientName(e.target.value)}
-                    placeholder="Ad Soyad"
+                    placeholder="Full Legal Name"
                     className="w-full px-3.5 py-2.5 rounded-md border border-neutral-300 text-xs font-medium focus:ring-2 focus:ring-neutral-900 focus:border-transparent outline-hidden"
                   />
                 </div>
@@ -845,21 +876,21 @@ export default function WithdrawModal({
 
               <div className="space-y-1">
                 <h3 className="text-base font-bold text-neutral-900">
-                  {flowState === "preparing" && "1/3 Sözleşme Taslağı Hazırlanıyor..."}
-                  {flowState === "signing" && "2/3 Privy Cüzdan İmzası Bekleniyor..."}
-                  {flowState === "submitting" && "3/3 İşlem Ağa Gönderiliyor..."}
-                  {flowState === "polling" && "Anchor Çekim Durumu Takip Ediliyor..."}
+                  {flowState === "preparing" && "1/3 Preparing Contract Transaction..."}
+                  {flowState === "signing" && "2/3 Awaiting Privy Wallet Signature..."}
+                  {flowState === "submitting" && "3/3 Submitting to Stellar Network..."}
+                  {flowState === "polling" && "Tracking Anchor Off-Ramp Status..."}
                 </h3>
                 <p className="text-xs text-neutral-500 max-w-sm">
                   {flowState === "signing"
-                    ? "Lütfen Privy onay penceresinde işlemi imzalayın. Akıllı sözleşmeden bakiye sıfırlanıp anchor'a iletilecektir."
+                    ? "Please approve the transaction in the Privy wallet popup. Your contract balance will transfer to the anchor."
                     : currentMeta.description}
                 </p>
               </div>
 
               {withdrawalId && (
                 <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md bg-neutral-100 text-[11px] font-mono text-neutral-700 border border-neutral-200">
-                  <span>İşlem ID:</span>
+                  <span>Withdrawal ID:</span>
                   <span className="font-semibold">{withdrawalId}</span>
                 </div>
               )}
@@ -873,18 +904,18 @@ export default function WithdrawModal({
                 <AlertTriangleIcon className="h-6 w-6 text-amber-600 shrink-0 mt-0.5" />
                 <div>
                   <h4 className="text-sm font-bold text-amber-900">
-                    Varlık Güven Hattı Eksik (pending_trust)
+                    Action Required: Missing Asset Trustline (pending_trust)
                   </h4>
                   <p className="text-xs text-amber-800 mt-1">
-                    Anchor, TRY varlığı için hesabınızda tanımlı bir trustline bulamadı. Güvenlik gereği bakiye <strong>Stellar Claimable Balance (Hak Talebi)</strong> olarak güvenceye alındı.
+                    The anchor could not transfer TRY directly because your Stellar account lacks a trustline for the asset. Your funds have been locked safely in a <strong>Stellar Claimable Balance</strong>.
                   </p>
                 </div>
               </div>
 
               <div className="bg-white p-3.5 rounded-md border border-amber-200 text-xs space-y-2 text-neutral-700">
-                <p className="font-semibold text-neutral-900">Hak Talebi ile Bakiyeyi Aktarın:</p>
+                <p className="font-semibold text-neutral-900">Claim Balance to Resume Off-Ramp:</p>
                 <p className="text-[11px] text-neutral-600">
-                  Tek bir onay ile bekleyen bakiyenizi talep edebilir ve Türk Lirası banka transferini kaldığı yerden devam ettirebilirsiniz.
+                  Click below to claim your pending balance and signal the anchor to continue the Turkish Lira bank wire.
                 </p>
                 <button
                   type="button"
@@ -897,7 +928,7 @@ export default function WithdrawModal({
                   ) : (
                     <CheckCircleIcon className="h-4 w-4" />
                   )}
-                  <span>Bakiyeyi Talep Et (Claim Your Balance)</span>
+                  <span>Claim Your Balance &amp; Resume Transfer</span>
                 </button>
               </div>
             </div>
@@ -912,10 +943,10 @@ export default function WithdrawModal({
                 </div>
                 <div>
                   <h3 className="text-lg font-bold text-emerald-950 tracking-tight">
-                    Türk Lirası Hesabınıza Aktarıldı!
+                    Turkish Lira Successfully Transferred!
                   </h3>
                   <p className="text-xs text-emerald-700 mt-0.5">
-                    Anchor FAST ödemesi banka tarafından onaylandı ve dekont üretildi.
+                    Anchor FAST wire has been processed and acknowledged by receiving bank.
                   </p>
                 </div>
                 <div className="text-2xl font-black text-emerald-900 tracking-tight">
@@ -927,10 +958,10 @@ export default function WithdrawModal({
               <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-4 space-y-3">
                 <div className="flex items-center justify-between pb-2 border-b border-neutral-200">
                   <span className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">
-                    Banka Transfer Kanıtı (Fiat Proof)
+                    Bank Settlement Proof (Fiat Proof)
                   </span>
                   <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded">
-                    ✓ FAST Onaylı
+                    ✓ FAST Confirmed
                   </span>
                 </div>
 
@@ -939,7 +970,7 @@ export default function WithdrawModal({
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 p-2.5 rounded bg-white border border-neutral-200">
                     <div>
                       <p className="text-[11px] text-neutral-500 font-medium">
-                        Banka Referans No (external_transaction_id):
+                        Bank Reference ID (external_transaction_id):
                       </p>
                       <p className="font-mono font-bold text-neutral-900 select-all text-xs sm:text-sm">
                         {externalTxId}
@@ -951,7 +982,7 @@ export default function WithdrawModal({
                       className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-neutral-700 bg-neutral-100 hover:bg-neutral-200 rounded transition-colors self-start sm:self-auto cursor-pointer"
                     >
                       {copiedBankRef ? <CheckIcon className="h-3.5 w-3.5 text-emerald-600" /> : <CopyIcon className="h-3.5 w-3.5" />}
-                      <span>{copiedBankRef ? "Kopyalandı" : "Kopyala"}</span>
+                      <span>{copiedBankRef ? "Copied" : "Copy"}</span>
                     </button>
                   </div>
 
@@ -961,16 +992,16 @@ export default function WithdrawModal({
                       <p className="font-mono font-semibold text-neutral-800 truncate">{anchorTxId}</p>
                     </div>
                     <div>
-                      <span className="text-neutral-400">Hedef Hesap:</span>
+                      <span className="text-neutral-400">Target IBAN:</span>
                       <p className="font-mono font-semibold text-neutral-800">{iban.slice(0, 10)}...{iban.slice(-4)}</p>
                     </div>
                     <div>
-                      <span className="text-neutral-400">Çekilen Miktar:</span>
+                      <span className="text-neutral-400">Settled Amount:</span>
                       <p className="font-semibold text-neutral-800">{usdcAmountDisplay} USDC</p>
                     </div>
                     <div>
-                      <span className="text-neutral-400">Banka Kanalı:</span>
-                      <p className="font-semibold text-neutral-800">TCMB FAST (Anlık)</p>
+                      <span className="text-neutral-400">Clearing Network:</span>
+                      <p className="font-semibold text-neutral-800">TCMB FAST (Instant)</p>
                     </div>
                   </div>
                 </div>
@@ -984,25 +1015,25 @@ export default function WithdrawModal({
               <div className="flex items-start gap-3">
                 <ExclamationCircleIcon className="h-6 w-6 text-red-600 shrink-0 mt-0.5" />
                 <div>
-                  <h4 className="text-sm font-bold text-red-900">Çekim İşlemi Tamamlanamadı</h4>
+                  <h4 className="text-sm font-bold text-red-900">Off-Ramp Transfer Could Not Be Completed</h4>
                   <p className="text-xs text-red-800 mt-1 font-mono">
-                    {errorMessage || "Anchor veya banka FAST altyapısı işlemi reddetti."}
+                    {errorMessage || "Anchor or banking network rejected the transfer."}
                   </p>
                 </div>
               </div>
 
               {/* Actionable Guidance */}
               <div className="p-3.5 rounded bg-white border border-red-200 text-xs space-y-2 text-neutral-700">
-                <p className="font-bold text-neutral-900">Ne Yapabilirsiniz? (Çözüm Adımları):</p>
+                <p className="font-bold text-neutral-900">What You Can Do (Troubleshooting Steps):</p>
                 <ul className="list-disc list-inside space-y-1 text-[11px] text-neutral-600">
                   <li>
-                    <strong>IBAN Bilgisini Doğrulayın:</strong> Alıcı IBAN ile Privy hesabınızdaki ad-soyad bilgilerinin resmi banka kaydınızla birebir örtüştüğünden emin olun.
+                    <strong>Verify IBAN &amp; Name:</strong> Ensure the recipient name matches the legal bank account holder name on file with your bank.
                   </li>
                   <li>
-                    <strong>On-Chain Bakiye Güvende:</strong> Reddedilen transferlerde akıllı sözleşmedeki bakiyeniz korunur veya hesabınıza iade edilir.
+                    <strong>On-Chain Funds are Protected:</strong> Failed or rejected off-ramp requests never lose your USDC; funds remain in your contract balance.
                   </li>
                   <li>
-                    <strong>Tekrar Deneyin:</strong> Geçici FAST ağ yoğunluğu durumunda birkaç dakika bekleyip çekimi tekrarlayabilirsiniz.
+                    <strong>Try Again:</strong> If this was a temporary FAST network timeout, wait a moment and retry.
                   </li>
                 </ul>
               </div>
@@ -1013,14 +1044,14 @@ export default function WithdrawModal({
                   onClick={startWithdrawal}
                   className="px-4 py-2 bg-neutral-900 hover:bg-neutral-800 text-white rounded-md text-xs font-semibold shadow-xs transition-colors cursor-pointer"
                 >
-                  Tekrar Dene
+                  Retry Withdrawal
                 </button>
                 <button
                   type="button"
                   onClick={() => setFlowState("form")}
                   className="px-4 py-2 border border-neutral-300 text-neutral-700 bg-white hover:bg-neutral-50 rounded-md text-xs font-semibold transition-colors cursor-pointer"
                 >
-                  Forma Dön
+                  Back to Form
                 </button>
               </div>
             </div>
@@ -1030,12 +1061,12 @@ export default function WithdrawModal({
           <div className="pt-2 border-t border-neutral-200">
             <details className="group text-xs text-neutral-500">
               <summary className="cursor-pointer font-semibold hover:text-neutral-800 flex items-center justify-between select-none">
-                <span>Demo Provizyon / Test Kontrolleri (SEP-6 Status Machine)</span>
+                <span>Judge Rehearsal Controls (Simulate Anchor SEP-6 States)</span>
                 <span className="text-[10px] bg-neutral-100 px-2 py-0.5 rounded font-mono">Simulate</span>
               </summary>
               <div className="mt-3 p-2.5 rounded bg-neutral-100 border border-neutral-200 space-y-2">
                 <p className="text-[11px] text-neutral-600">
-                  Jüri ve test sunumunda anchor&apos;ın tüm durumlarını anında simüle edebilirsiniz:
+                  Simulate any anchor state live to test state machine transitions and error recovery:
                 </p>
                 <div className="flex flex-wrap gap-1.5">
                   <button
@@ -1068,17 +1099,59 @@ export default function WithdrawModal({
                   </button>
                   <button
                     type="button"
-                    onClick={() => simulateState("error")}
-                    className="px-2 py-1 rounded text-[10px] font-mono bg-red-100 hover:bg-red-200 text-red-800 font-bold cursor-pointer"
-                  >
-                    error (Failure Path)
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => simulateState("completed")}
                     className="px-2 py-1 rounded text-[10px] font-mono bg-emerald-200 hover:bg-emerald-300 text-emerald-900 font-bold cursor-pointer"
                   >
-                    completed (Bank Proof)
+                    completed (FAST Proof)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => simulateState("failed")}
+                    className="px-2 py-1 rounded text-[10px] font-mono bg-red-100 hover:bg-red-200 text-red-800 font-bold cursor-pointer"
+                  >
+                    failed (Name Mismatch)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => simulateState("error")}
+                    className="px-2 py-1 rounded text-[10px] font-mono bg-red-100 hover:bg-red-200 text-red-800 font-bold cursor-pointer"
+                  >
+                    error (Gateway 504)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => simulateState("no_market")}
+                    className="px-2 py-1 rounded text-[10px] font-mono bg-red-100 hover:bg-red-200 text-red-800 cursor-pointer"
+                  >
+                    no_market (FX Liquidity)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => simulateState("expired")}
+                    className="px-2 py-1 rounded text-[10px] font-mono bg-neutral-200 hover:bg-neutral-300 text-neutral-800 cursor-pointer"
+                  >
+                    expired (Quote Timeout)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => simulateState("too_small")}
+                    className="px-2 py-1 rounded text-[10px] font-mono bg-amber-100 hover:bg-amber-200 text-amber-800 cursor-pointer"
+                  >
+                    too_small (&lt; 1 USDC)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => simulateState("too_large")}
+                    className="px-2 py-1 rounded text-[10px] font-mono bg-amber-100 hover:bg-amber-200 text-amber-800 cursor-pointer"
+                  >
+                    too_large (&gt; Limit)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => simulateState("refunded")}
+                    className="px-2 py-1 rounded text-[10px] font-mono bg-neutral-200 hover:bg-neutral-300 text-neutral-800 cursor-pointer"
+                  >
+                    refunded (Returned)
                   </button>
                 </div>
               </div>
@@ -1093,7 +1166,7 @@ export default function WithdrawModal({
             onClick={handleClose}
             className="px-4 py-2 border border-neutral-300 text-xs font-semibold rounded-md text-neutral-700 bg-white hover:bg-neutral-50 transition-colors shadow-xs cursor-pointer"
           >
-            {flowState === "completed" ? "Kapat" : "Vazgeç"}
+            {flowState === "completed" ? "Close" : "Cancel"}
           </button>
 
           {flowState === "form" && (
@@ -1103,7 +1176,7 @@ export default function WithdrawModal({
               disabled={isBelowMinimum}
               className="inline-flex items-center gap-1.5 px-5 py-2 rounded-md text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm cursor-pointer"
             >
-              <span>Çekimi Başlat</span>
+              <span>Initiate Withdrawal</span>
               <ArrowRightIcon className="h-3.5 w-3.5" />
             </button>
           )}
@@ -1114,7 +1187,7 @@ export default function WithdrawModal({
               onClick={handleClose}
               className="px-5 py-2 rounded-md text-xs font-bold text-white bg-neutral-900 hover:bg-neutral-800 transition-colors shadow-sm cursor-pointer"
             >
-              Tamamla
+              Done
             </button>
           )}
         </div>

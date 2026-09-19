@@ -36,6 +36,7 @@ export default function AgentConsolePage() {
   // Configuration Inputs
   const [proxySlug, setProxySlug] = useState("demo");
   const [budgetUsdc, setBudgetUsdc] = useState("0.30"); // 3 calls at 0.10 USDC each
+  const [omitBudgetHeader, setOmitBudgetHeader] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   // Execution & Call History State
@@ -169,6 +170,7 @@ export default function AgentConsolePage() {
         agent,
         budgetStroops,
         isFirstCall,
+        omitBudgetHeader,
       });
 
       startTransition(() => {
@@ -582,6 +584,28 @@ export default function AgentConsolePage() {
           </div>
         </div>
 
+        {/* Missing Header Simulation Checkbox */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl bg-neutral-50 border border-neutral-200 text-xs">
+          <label className="flex items-center gap-2.5 font-semibold text-neutral-800 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={omitBudgetHeader}
+              onChange={(e) => setOmitBudgetHeader(e.target.checked)}
+              className="rounded border-neutral-300 text-amber-600 focus:ring-amber-500 h-4 w-4 cursor-pointer"
+            />
+            <span>
+              Simulate Failure: <strong className="text-amber-800">Omit X-Agent-Budget Header</strong> (Demonstrates 400 Refusal)
+            </span>
+          </label>
+          <span className="text-[11px] text-neutral-500 font-mono">
+            {omitBudgetHeader ? (
+              <span className="text-amber-700 font-bold">⚠ Header will be omitted</span>
+            ) : (
+              <span className="text-neutral-500">✓ Header will be sent</span>
+            )}
+          </span>
+        </div>
+
         {/* Action Trigger Banner */}
         <div className="pt-4 border-t border-neutral-100 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="text-sm">
@@ -592,6 +616,11 @@ export default function AgentConsolePage() {
                 Limit reached! Contract will refuse call on-chain (403)
               </span>
             )}
+            {omitBudgetHeader && (
+              <span className="ml-2 text-xs font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                Omission active (expects 400 refusal)
+              </span>
+            )}
           </div>
 
           <button
@@ -599,10 +628,12 @@ export default function AgentConsolePage() {
             onClick={handleCallEndpoint}
             disabled={isCalling || !agent}
             className={`w-full sm:w-auto inline-flex items-center justify-center px-8 py-3.5 border border-transparent text-base font-bold rounded-xl shadow-md transition-all ${
-              isBudgetExhausted
+              omitBudgetHeader
+                ? "bg-amber-600 hover:bg-amber-700 text-white focus:ring-amber-500"
+                : isBudgetExhausted
                 ? "bg-rose-600 hover:bg-rose-700 text-white focus:ring-rose-500"
                 : "bg-indigo-600 hover:bg-indigo-700 text-white focus:ring-indigo-500"
-            } disabled:opacity-50 disabled:cursor-not-allowed`}
+            } disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer`}
           >
             {isCalling ? (
               <span className="flex items-center gap-2">
@@ -614,7 +645,9 @@ export default function AgentConsolePage() {
               </span>
             ) : (
               <span>
-                {isBudgetExhausted
+                {omitBudgetHeader
+                  ? `Execute Call #${activeCallNumber} (Trigger 400 Refusal)`
+                  : isBudgetExhausted
                   ? `Execute Call #${activeCallNumber} (Trigger On-Chain Refusal)`
                   : `Call Endpoint #${activeCallNumber} (x402 Flow)`}
               </span>
@@ -624,10 +657,64 @@ export default function AgentConsolePage() {
       </div>
 
       {/* ------------------------------------------------------------------------------------- */}
-      {/* 4. Prominent Outcome Alerts (200 OK / 403 Refused / 502 Upstream)                      */}
+      {/* 4. Prominent Outcome Alerts (200 OK / 400 Bad Request / 403 Refused / 502 Upstream)   */}
       {/* ------------------------------------------------------------------------------------- */}
       {lastResult && (
         <div className="space-y-4">
+          {/* 400 Missing Budget Header: Agent Safety Constraint */}
+          {lastResult.status === 400 && (
+            <div className="bg-amber-950 text-white border-2 border-amber-500 rounded-2xl p-6 sm:p-8 shadow-xl">
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-xl bg-amber-600 flex items-center justify-center shrink-0 shadow-md">
+                  <svg className="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth="2.5"
+                      d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                    />
+                  </svg>
+                </div>
+
+                <div className="space-y-2 flex-1">
+                  <div className="flex items-center gap-3">
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-500 text-neutral-950 uppercase tracking-wider">
+                      HTTP 400 Bad Request · missing_budget_header
+                    </span>
+                    <span className="text-xs text-amber-300 font-semibold">
+                      Autonomous Guard Rail Active
+                    </span>
+                  </div>
+
+                  <h3 className="text-2xl font-black tracking-tight text-white">
+                    Mandatory Budget Ceiling Missing
+                  </h3>
+
+                  <p className="text-base text-amber-200 leading-relaxed">
+                    {lastResult.missingBudgetHeaderMessage ||
+                      "The gateway refused the request because the agent omitted the X-Agent-Budget header on its initial call."}
+                  </p>
+
+                  <div className="mt-4 pt-4 border-t border-amber-800/80 grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                    <div className="bg-amber-900/60 p-3 rounded-lg border border-amber-700/50">
+                      <span className="text-amber-400 block font-sans font-bold">Why This Rule Exists:</span>
+                      <span className="text-amber-100 font-sans leading-relaxed">
+                        To protect autonomous agents from unbounded financial exposure, Ramp402 enforces an explicit budget ceiling on the smart contract before any x402 payment signature is accepted.
+                      </span>
+                    </div>
+
+                    <div className="bg-amber-900/60 p-3 rounded-lg border border-amber-700/50">
+                      <span className="text-amber-400 block font-sans font-bold">Financial Guarantee:</span>
+                      <span className="text-emerald-300 font-sans font-semibold">
+                        &check; Zero USDC charged. The challenge was aborted before payment was signed or submitted.
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* 403 Budget Exceeded: The Core Hackathon Demo Climax */}
           {lastResult.status === 403 && (
             <div className="bg-rose-950 text-white border-2 border-rose-500 rounded-2xl p-6 sm:p-8 shadow-xl">
@@ -838,10 +925,12 @@ export default function AgentConsolePage() {
                           ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
                           : call.status === 403
                           ? "bg-rose-100 text-rose-800 border border-rose-200"
+                          : call.status === 400
+                          ? "bg-amber-100 text-amber-900 border border-amber-300"
                           : "bg-amber-100 text-amber-800 border border-amber-200"
                       }`}
                     >
-                      Status {call.status}
+                      Status {call.status} {call.status === 400 ? "· missing_budget" : call.status === 403 ? "· budget_exceeded" : call.status === 200 ? "· settled" : ""}
                     </span>
                   </div>
 

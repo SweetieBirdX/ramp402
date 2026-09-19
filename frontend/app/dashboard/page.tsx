@@ -118,6 +118,7 @@ export default function DashboardPage() {
     stellarAddress,
     email,
     isCreatingWallet,
+    login,
   } = useAuth();
   const router = useRouter();
 
@@ -270,10 +271,12 @@ export default function DashboardPage() {
           .catch((err: unknown) => {
             const message =
               err instanceof ApiError
-                ? `${err.status} ${err.code}: ${err.message}`
+                ? err.status === 401
+                  ? "Authentication session expired. Please log in again to view call logs."
+                  : err.message
                 : err instanceof Error
                 ? err.message
-                : "Failed to load calls";
+                : "Unable to retrieve call history. Please verify that the gateway service is running.";
             setCallsError((e) => ({
               ...e,
               [endpointId]: message,
@@ -355,21 +358,50 @@ export default function DashboardPage() {
 
   const renderError = (err: ApiError | Error, retryAction?: () => void) => {
     if (err instanceof ApiError) {
+      // 401 Unauthorized / Session Expired
+      if (err.status === 401 || err.code === "unauthorized") {
+        return (
+          <div className="rounded-xl bg-amber-50 border border-amber-300 p-5 text-xs text-amber-950 space-y-3 shadow-xs">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 font-bold text-amber-950">
+                  <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-bold bg-amber-200 text-amber-900">
+                    401 Unauthorized
+                  </span>
+                  <span className="text-sm">Session Expired or Invalid</span>
+                </div>
+                <p className="text-xs text-amber-800">
+                  Your seller authentication token has expired. Please log in again to access your endpoints and on-chain balance.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => login()}
+                className="px-4 py-2 bg-neutral-900 hover:bg-neutral-800 text-white rounded-lg text-xs font-bold shadow-xs transition-colors shrink-0 cursor-pointer"
+              >
+                Log In Again
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      // 403 Forbidden / Not Bootstrapped
       if (err.status === 403) {
         return (
-          <div className="rounded-lg bg-amber-50 border border-amber-300 p-4 text-xs text-amber-900 space-y-3">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="rounded-xl bg-amber-50 border border-amber-300 p-5 text-xs text-amber-900 space-y-3 shadow-xs">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex items-center gap-2 font-semibold">
                 <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-bold bg-amber-200 text-amber-900">
                   403 Forbidden
                 </span>
-                <span>Seller Account Not Bootstrapped</span>
+                <span className="text-sm font-bold">Seller Account Not Bootstrapped</span>
               </div>
               <button
                 type="button"
                 onClick={executeBootstrap}
                 disabled={isSettingUpAccount}
-                className="px-3 py-1.5 bg-amber-800 hover:bg-amber-900 text-white rounded font-medium text-xs shadow-xs transition-colors cursor-pointer disabled:opacity-50 self-start sm:self-auto"
+                className="px-3.5 py-1.5 bg-amber-800 hover:bg-amber-900 text-white rounded-md font-bold text-xs shadow-xs transition-colors cursor-pointer disabled:opacity-50 self-start sm:self-auto"
               >
                 {isSettingUpAccount ? "Bootstrapping..." : "Bootstrap Account Now"}
               </button>
@@ -387,34 +419,50 @@ export default function DashboardPage() {
         );
       }
 
+      // 501 Not Implemented
       if (err.status === 501) {
         return (
-          <div className="rounded-lg bg-neutral-100 border border-neutral-300 p-4 text-xs text-neutral-800 space-y-1">
+          <div className="rounded-xl bg-neutral-100 border border-neutral-300 p-4 text-xs text-neutral-800 space-y-1">
             <div className="flex items-center gap-2 font-semibold">
               <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-bold bg-neutral-200 text-neutral-800">
                 501 Not Implemented
               </span>
-              <span>Feature Stubbed in Gateway</span>
+              <span className="font-bold">Feature Stubbed in Gateway</span>
             </div>
             <p className="text-neutral-600">{err.message}</p>
           </div>
         );
       }
 
+      // Human explanation fallback
+      const errorExplanation: Record<string, string> = {
+        endpoint_not_found: "The requested API endpoint was not found on the gateway.",
+        upstream_failed: "The seller upstream API failed to respond successfully or timed out.",
+        anchor_error: "Stellar anchor service encountered an issue while processing.",
+        missing_budget_header: "Mandatory X-Agent-Budget header was missing on first call.",
+        budget_exceeded: "Spending budget limit exceeded for this agent on-chain.",
+      };
+      const explanation = errorExplanation[err.code] || err.message;
+
       return (
-        <div className="rounded-lg bg-red-50 border border-red-200 p-4 text-xs text-red-900 space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 font-semibold">
-              <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-bold bg-red-200 text-red-900">
-                {err.status} {err.code}
-              </span>
-              <span className="font-mono">{err.message}</span>
+        <div className="rounded-xl bg-red-50 border border-red-200 p-4 text-xs text-red-900 space-y-2 shadow-xs">
+          <div className="flex items-center justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 font-semibold">
+                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-bold bg-red-200 text-red-900">
+                  {err.status} {err.code}
+                </span>
+                <span className="font-bold text-red-950">{explanation}</span>
+              </div>
+              {err.message && err.message !== explanation && (
+                <p className="text-red-700 text-[11px] font-mono">{err.message}</p>
+              )}
             </div>
             {retryAction ? (
               <button
                 type="button"
                 onClick={retryAction}
-                className="px-2.5 py-1 bg-red-800 hover:bg-red-900 text-white rounded text-xs font-medium cursor-pointer"
+                className="px-3 py-1.5 bg-red-800 hover:bg-red-900 text-white rounded-md text-xs font-semibold cursor-pointer shrink-0 shadow-xs transition-colors"
               >
                 Retry
               </button>
@@ -425,17 +473,19 @@ export default function DashboardPage() {
     }
 
     return (
-      <div className="rounded-lg bg-red-50 border border-red-200 p-4 text-xs text-red-900 space-y-2">
-        <div className="flex items-center justify-between gap-2">
-          <div>
-            <p className="font-semibold">Client / Network Error</p>
-            <p className="mt-0.5 text-red-700">{err.message}</p>
+      <div className="rounded-xl bg-red-50 border border-red-200 p-4 text-xs text-red-900 space-y-2 shadow-xs">
+        <div className="flex items-center justify-between gap-3">
+          <div className="space-y-1">
+            <p className="font-bold text-red-950">Connection / Network Issue</p>
+            <p className="text-red-700 leading-relaxed">
+              Unable to reach the gateway service. Please verify that the gateway is running on <code className="font-mono bg-red-100 px-1 py-0.5 rounded">{gatewayUrl}</code>.
+            </p>
           </div>
           {retryAction ? (
             <button
               type="button"
               onClick={retryAction}
-              className="px-2.5 py-1 bg-red-800 hover:bg-red-900 text-white rounded text-xs font-medium cursor-pointer"
+              className="px-3 py-1.5 bg-red-800 hover:bg-red-900 text-white rounded-md text-xs font-semibold cursor-pointer shrink-0 shadow-xs transition-colors"
             >
               Retry
             </button>
