@@ -1,21 +1,34 @@
-# Proposed changes to CONVENTIONS.md §1.2 — operator identity and amount validation
+# Batched changes to CONVENTIONS.md — review before merging
 
-**Status: PROPOSED — not yet applied.** `docs/CONVENTIONS.md` is unchanged. Efe applies this to
-§1.2 once Ömer and Mert have agreed, per Rule 0, and everyone pulls immediately afterwards.
+**Status: PROPOSED — not yet applied.** `docs/CONVENTIONS.md` is unchanged. Efe applies all of this
+in one edit once Ömer and Mert have agreed, per Rule 0, and everyone pulls immediately afterwards.
 
-The contract code in `contract/` already implements everything below, with tests. That is
-deliberate: the code is easier to judge than a description, and reverting it is one `git revert`.
-If the team rejects a point here, say so and the code changes to match — the document wins.
+Three unrelated corrections are batched deliberately: each one on its own would cost the team a
+pull, a re-read and an interruption. One agreed edit, one commit, one sync.
+
+| | What | Section | Who it affects |
+| --- | --- | --- | --- |
+| **A** | Operator identity, constructor, rotation, amount validation | §1.2 | Ömer (deploy + error codes) |
+| **B** | x402 v2 header names — the document names v1 headers that do not exist for Stellar | §1.3 | Ömer (P3-O3), Mert |
+| **C** | Encrypted upstream credentials column | §1.4 + `schema.sql` | Ömer (P3-O2) |
+
+A is already implemented and deployed; B and C are ahead of the code. If the team rejects a point,
+the code changes to match — the document wins.
 
 Author: Efe · 19 September 2026
 
 ---
 
+# A — Operator identity and amount validation (§1.2)
+
+**Implemented and live** in `CC73BWETYN2PWAO6YPDLX4H75XUUMH4HDQQJMJYQPY2SW3PE2TEP4CVJ`, with 23
+unit tests and an on-chain smoke test. The document is what is now behind.
+
 ## Why
 
-`operator` is a parameter, and the contract never knew which address the gateway's operator
+`operator` was a parameter, and the contract never knew which address the gateway's operator
 actually is. `operator.require_auth()` proves only that *whoever was named* signed, and any address
-can sign for itself. So today, on the deployed contract, anyone can:
+can sign for itself. Before this change, anyone could:
 
 1. call `settle(themselves, endpoint_id, any_amount)` and credit any seller any balance. §1.3 says
    `GET /api/balance` reads the chain and that the chain is the source of truth, so the gateway
@@ -24,11 +37,9 @@ can sign for itself. So today, on the deployed contract, anyone can:
    one stroop — permanently, because the budget is frozen on the first call and never re-read;
 3. inflate `TreasuryTotal` at will.
 
-Separately, `settle` accepts a negative `amount`, which *debits* a seller's balance.
+`settle` also accepted a negative `amount`, which *debits* a seller's balance.
 
----
-
-## Change 1 — storage gains an operator address
+## A1 — storage gains an operator address
 
 §1.2's storage block, replacing the current one:
 
@@ -50,7 +61,7 @@ address read on every privileged call, so it belongs with the contract instance:
 contract and its TTL rides along with the instance instead of being a separate entry that can
 expire on its own. The TTL rule is unchanged — every write extends it.
 
-## Change 2 — three functions, and two of the six gain a panic
+## A2 — three functions, and two of the six gain a panic
 
 Added to §1.2's signature list:
 
@@ -82,14 +93,13 @@ parameter stays ignored entirely, including when the gateway has no `X-Agent-Bud
 forward and sends 0 — §1.3 allows exactly that, and validating on every call would break the proxy
 on its second request.
 
-`get_operator` is the one item here nobody asked for. It is a three-line view, and it is what lets
+`get_operator` is the one item nobody asked for. It is a three-line view, and it is what lets
 `scripts/preflight.ts` confirm in one RPC call that the deployed operator matches the gateway's
-`OPERATOR_SECRET_KEY` before a demo instead of after it. Drop it if you would rather keep the ABI
-at the agreed six-plus-two.
+`OPERATOR_SECRET_KEY` before a demo instead of after it.
 
-## Change 3 — the error codes get written down
+## A3 — the error codes get written down
 
-§1.2 has never listed them, and `gateway/src/stellar.ts` currently carries them as a comment
+§1.2 has never listed them, and `gateway/src/stellar.ts` carries them as a comment
 ("1 = SpendingLimitExceeded, 2 = EndpointNotFound"). Proposed table:
 
 | Code | Name | Raised by | Means |
@@ -102,7 +112,7 @@ at the agreed six-plus-two.
 
 Codes are append-only: a number that has been deployed is never reused for a different meaning.
 
-## Change 4 — the rounding rule stops contradicting itself
+## A4 — the rounding rule stops contradicting itself
 
 §1.2 currently says:
 
@@ -126,37 +136,122 @@ replacement:
 The alternative is to change the code instead: ceiling division, `(amount + 99) / 100`, gives the
 remainder to the treasury and satisfies the sentence as written. One line in `settle`, one line
 wherever the gateway mirrors it. **The formula is implemented; the sentence is what this proposal
-changes.** Say if you want it the other way round.
+changes.**
+
+---
+
+# B — x402 v2 header names (§1.3)
+
+**Not yet implemented — this is ahead of the code, and P3-O3 depends on it.**
+
+§1.3 currently says:
+
+> - `GET /proxy/:proxy_slug` — 402 → retry with `X-PAYMENT` → 200.
+
+`X-PAYMENT` and `X-PAYMENT-RESPONSE` are **x402 v1** names. Stellar's facilitator only speaks
+**v2** — there is no v1 entry for Stellar at `https://x402.org/facilitator/supported` — and v2
+renamed the headers. Following the document as written produces a proxy that no x402 client can
+talk to, and the failure is a silent mismatch rather than an error.
+
+Proposed replacement for that bullet:
+
+> - `GET /proxy/:proxy_slug` — 402 → retry with a payment → 200, over **x402 v2**. Stellar's
+>   facilitator does not support v1, so the v1 header names `X-PAYMENT` / `X-PAYMENT-RESPONSE` are
+>   never used. The v2 headers are:
+>
+>   | Header | Direction | Carries |
+>   | --- | --- | --- |
+>   | `PAYMENT-REQUIRED` | gateway → agent, with the 402 | what must be paid, for this endpoint's price |
+>   | `PAYMENT-SIGNATURE` | agent → gateway, on the retry | the agent's signed payment |
+>   | `PAYMENT-RESPONSE` | gateway → agent, with the 200 | the facilitator's settlement receipt |
+>
+>   Build and parse these with `@x402/express`, pinned to `2.26.0` (spike S1). Never hand-construct
+>   the header: its encoding is part of the protocol and changes between versions.
+
+`X-Agent-Budget` is **ours**, not x402's, and is unaffected — it keeps its name, stays mandatory on
+a pair's first call, and is still ignored afterwards.
+
+Everything else in §1.3's `/proxy` rules stands: `400 missing_budget_header`, `403 budget_exceeded`
+with the rejected transaction hash, `502 upstream_failed` with no `settle`.
+
+---
+
+# C — encrypted upstream credentials (§1.4 and `schema.sql`)
+
+**Not yet implemented — P3-O2 needs it.** Checklist §C requires the seller's upstream API key to be
+encrypted at rest. A seller registering `https://user:key@api.example.com/v1` must not have those
+credentials sitting in plaintext in a table, and `upstream_url` must be stored stripped of them, or
+they leak through `GET /api/endpoints` into the dashboard.
+
+`schema.sql` has nowhere to put them today. Proposed change to the `endpoints` table — one column:
+
+```sql
+CREATE TABLE IF NOT EXISTS endpoints (
+  id TEXT PRIMARY KEY,
+  seller_id TEXT NOT NULL REFERENCES sellers(id),
+  upstream_url TEXT NOT NULL,
+  upstream_credentials TEXT,          -- encrypted; NULL when the upstream needs no auth
+  proxy_slug TEXT NOT NULL UNIQUE,
+  price_stroops INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+Rules to add under §1.4:
+
+- `upstream_url` is stored **with any credentials removed**. It is returned by `GET /api/endpoints`
+  and must be safe to show in the UI.
+- `upstream_credentials` holds ciphertext, never plaintext, encrypted with
+  `UPSTREAM_CRED_ENCRYPTION_KEY` (already in `gateway/.env.example`; 64 hex characters = a 32-byte
+  AES-256 key). It is **never** returned by any route — not `GET /api/endpoints`, not in an error
+  message, not in a log line. Only the proxy reads it, and only to attach it to the upstream
+  request.
+- The stored value must carry everything decryption needs: with AES-256-GCM that means the IV and
+  the auth tag alongside the ciphertext, e.g. `base64(iv):base64(tag):base64(ciphertext)`.
+  Ciphertext alone cannot be decrypted, and discovering that after the demo data exists is
+  expensive.
+- `NULL` means the upstream needs no authentication. That is the common case and must not be
+  treated as an error.
+
+**Migration: there isn't one.** `schema.sql` is idempotent `CREATE TABLE IF NOT EXISTS`, so adding a
+column does nothing to a database that already exists. SQLite here is a rebuildable cache and the
+chain is the source of truth, so the migration is to delete `ramp402.db` and let it be recreated —
+which is exactly what `npx tsx scripts/reset-demo.ts` does. Anyone who pulls this change and sees
+"no such column: upstream_credentials" should run that.
 
 ---
 
 ## Not part of this proposal, raised separately
 
 §1.1 lists seven machine codes. `gateway/src/types.ts` already ships three more — `invalid_request`,
-`not_found`, `internal_error` — which Mert types against. §1.1 should probably be brought in line
-with what the gateway actually built, but that is Ömer's call to describe and a separate edit.
+`not_found`, `internal_error` — which Mert types against. §1.1 should be brought in line with what
+the gateway actually built, but that is Ömer's call to describe and a separate edit.
 
 ---
 
-## What each person has to do if this is approved
+## What each person does if this is approved
 
-**Ömer** — three things, none of them urgent enough to interrupt him mid-task:
+**Ömer**
 
-1. The real contract deploy now takes `-- --operator G...`. The README's `## Contract` section has
-   the command. Whatever `OPERATOR_SECRET_KEY` the gateway runs with, its public key must be that
-   argument, or every `record_call` and `settle` fails with `NotOperator`.
-2. Contract error codes 3, 4 and 5 exist now (table above). `SorobanError.contractErrorCode`
-   already surfaces the number, so nothing breaks — it is a mapping opportunity, not a fix.
-3. Unrelated to the operator work: `/api/withdraw/prepare` needs the §1.5 minimum-amount guard.
-   The contract's `withdraw` returns 0 for an empty balance and deliberately does not panic, so
-   the gateway is the only thing stopping a seller signing a transaction that moves nothing.
+1. **A** — the contract is already deployed with the operator baked in. `CONTRACT_ID` is
+   `CC73BWETYN2PWAO6YPDLX4H75XUUMH4HDQQJMJYQPY2SW3PE2TEP4CVJ`; the existing `OPERATOR_SECRET_KEY`
+   is unchanged and still correct. Contract error codes 3, 4 and 5 now exist (table A3);
+   `SorobanError.contractErrorCode` already surfaces the number, so nothing breaks.
+2. **B** — build P3-O3 against the v2 header names. This is the one change that would have cost
+   real debugging time if it had been found during integration instead of before.
+3. **C** — `schema.sql` is yours; the column above is a proposal, not an edit. Nobody has touched
+   your file.
+4. Unrelated to all three: `/api/withdraw/prepare` needs the §1.5 minimum-amount guard. The
+   contract's `withdraw` returns 0 for an empty balance and deliberately does not panic, so the
+   gateway is the only thing stopping a seller signing a transaction that moves nothing.
 
-**Mert** — nothing changes on the frontend. No route, payload or type is touched.
+**Mert** — **B** may affect the agent console if it speaks x402 directly. Nothing else changes: no
+route, payload or type is touched.
 
 ## Open question for the three of us
 
 Should `set_operator` also require the **new** operator to sign? Today only the current operator
 signs, which is what was asked for. It means a mistyped address silently locks the role away and
-only a redeployment recovers it — and a redeployment changes `CONTRACT_ID`, which is the thing this
+only a redeployment recovers it — and a redeployment changes `CONTRACT_ID`, which is the thing the
 function exists to avoid. Requiring both signatures makes that mistake impossible, at the cost of a
-rotation transaction signed by two keys. One line either way; I did not want to choose it for you.
+rotation transaction signed by two keys. One line either way.
