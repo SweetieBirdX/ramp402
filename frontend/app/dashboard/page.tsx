@@ -13,6 +13,7 @@ import {
 } from "@/lib/api";
 import { stroopsToDisplay } from "@/lib/format";
 import type { EndpointSummary, GetBalanceResponse, CallSummary } from "@/lib/types";
+import AddEndpointModal from "@/components/AddEndpointModal";
 
 // -------------------------------------------------------------------------------------------------
 // Inline SVG Icons (zero external dependencies)
@@ -140,6 +141,11 @@ export default function DashboardPage() {
 
   // Obvious copy button state (requirement 3)
   const [copiedEndpointId, setCopiedEndpointId] = useState<string | null>(null);
+
+  // Add endpoint modal state
+  const [isAddEndpointOpen, setIsAddEndpointOpen] = useState(
+    () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("modal") === "open"
+  );
 
   const gatewayUrl = getGatewayUrl();
 
@@ -471,9 +477,8 @@ export default function DashboardPage() {
           </button>
           <button
             type="button"
-            disabled
-            className="inline-flex items-center px-4 py-2 border border-neutral-200 text-xs font-semibold rounded-md text-neutral-400 bg-neutral-100 cursor-not-allowed shadow-xs"
-            title="Registration pipeline arrives in next step"
+            onClick={() => setIsAddEndpointOpen(true)}
+            className="inline-flex items-center px-4 py-2 border border-transparent text-xs font-semibold rounded-md text-white bg-neutral-900 hover:bg-neutral-800 transition-colors shadow-xs cursor-pointer"
           >
             + Register Endpoint
           </button>
@@ -839,9 +844,8 @@ export default function DashboardPage() {
             <div>
               <button
                 type="button"
-                disabled
-                className="inline-flex items-center px-4 py-2 border border-neutral-300 text-xs font-semibold rounded-md text-neutral-400 bg-neutral-100 cursor-not-allowed shadow-xs"
-                title="Endpoint registration flow prepares in the next step"
+                onClick={() => setIsAddEndpointOpen(true)}
+                className="inline-flex items-center px-4 py-2 border border-transparent text-xs font-semibold rounded-md text-white bg-neutral-900 hover:bg-neutral-800 transition-colors shadow-xs cursor-pointer"
               >
                 + Register Your First Endpoint
               </button>
@@ -849,6 +853,16 @@ export default function DashboardPage() {
           </div>
         )}
       </div>
+
+      {/* Add Endpoint Modal */}
+      <AddEndpointModal
+        isOpen={isAddEndpointOpen}
+        onClose={() => setIsAddEndpointOpen(false)}
+        onSuccess={() => {
+          fetchDashboardData();
+        }}
+        stellarAddress={stellarAddress}
+      />
     </div>
   );
 }

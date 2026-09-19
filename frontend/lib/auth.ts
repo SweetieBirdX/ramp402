@@ -201,7 +201,7 @@ export function useAuth(): AuthState {
     return {
       ready: true,
       authenticated: true,
-      stellarAddress: "GC2BKJ6UDTJ2HBBGNTVWNXFM6S7V4V5Y6Z7A8B9C0D1E2F3G4H5I6J7K",
+      stellarAddress: "GC5CYZX6GKDUKLA5HGOQ44UIKMHZJ4GFQO2JJUTF2CTBMHCEK3WQOXYC",
       getAccessToken: async () => "demo_access_token",
       user: { id: "did:privy:demo_user_mert" } as unknown as ReturnType<typeof usePrivy>["user"],
       email: "mert@ramp402.org",
