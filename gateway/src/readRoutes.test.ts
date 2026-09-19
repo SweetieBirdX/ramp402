@@ -12,6 +12,7 @@ import { createFunder } from "./funding.js";
 import { redactUpstreamUrl } from "./readRoutes.js";
 import { createRepo, type Repo, type SellerRow } from "./repo.js";
 import { unusedLedger } from "./testing/ledger.js";
+import { unusedGate, unusedProxyLedger } from "./testing/proxy.js";
 import { privyTestKeys, privyToken, TEST_PRIVY_APP_ID } from "./testing/privy.js";
 
 // Public testnet-format addresses only; no secret keys in fixtures.
@@ -67,6 +68,8 @@ beforeEach(() => {
       funder: createFunder({ accountExists: async () => true, friendbotUrl: undefined }),
       drafts: createDraftStore(),
       ledger: unusedLedger,
+      gate: unusedGate,
+      proxyLedger: unusedProxyLedger,
       credentialCipher: createCredentialCipher("00".repeat(32)),
       readBalance: async (address) => {
         balanceReads.push(address);

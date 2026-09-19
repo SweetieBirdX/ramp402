@@ -14,6 +14,7 @@ import { createFunder } from "./funding.js";
 import { createRepo, type Repo } from "./repo.js";
 import { SorobanError } from "./stellar.js";
 import { fakeLedger, TEST_CONTRACT_ID, type FakeLedger } from "./testing/ledger.js";
+import { unusedGate, unusedProxyLedger } from "./testing/proxy.js";
 import { privyTestKeys, privyToken, TEST_PRIVY_APP_ID } from "./testing/privy.js";
 
 // Local keypairs stand in for the sellers' Privy wallets: generated per run, never persisted.
@@ -51,6 +52,8 @@ beforeEach(() => {
       readBalance: async () => 0n,
       drafts: createDraftStore({ ttlMs: DRAFT_TTL_MS, now: () => clock.t }),
       ledger: ledger.ledger,
+      gate: unusedGate,
+      proxyLedger: unusedProxyLedger,
       credentialCipher: cipher,
     },
     { log: false },

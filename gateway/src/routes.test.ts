@@ -9,6 +9,8 @@ import { createDraftStore } from "./drafts.js";
 import { createFunder } from "./funding.js";
 import { createRepo } from "./repo.js";
 import { unusedLedger } from "./testing/ledger.js";
+import { unusedGate, unusedProxyLedger } from "./testing/proxy.js";
+
 
 // Only route registration and validation are under test here; every dependency is inert.
 const repo = createRepo(openDatabase(":memory:"));
@@ -25,6 +27,8 @@ const app = createApp(
     readBalance: async () => 0n,
     drafts: createDraftStore(),
     ledger: unusedLedger,
+    gate: unusedGate,
+    proxyLedger: unusedProxyLedger,
     credentialCipher: createCredentialCipher("00".repeat(32)),
     funder: createFunder({ accountExists: async () => false, friendbotUrl: undefined }),
   },
@@ -50,12 +54,6 @@ const ROUTES: Array<{
     body: { draft_id: "draft123", signed_xdr: VALID_XDR },
   },
   { method: "get", path: "/api/withdrawals/w123", name: "GET /api/withdrawals/:id" },
-  {
-    method: "get",
-    path: "/proxy/wthr1234",
-    name: "GET /proxy/:proxy_slug",
-    headers: { "X-Agent-Budget": "10000000" },
-  },
 ];
 
 function send(method: "get" | "post", path: string, body?: object, headers: Record<string, string> = {}) {

@@ -178,10 +178,13 @@ export interface MissingBudgetHeaderResponse extends ErrorResponse {
   error: "missing_budget_header";
 }
 
-/** 403 — budget exceeded; carries the hash of the rejected record_call transaction. */
+/**
+ * 403 — budget exceeded. tx_hash is the record_call transaction the contract rejected ON-CHAIN (look it
+ * up on any explorer); null only if recording that rejection itself failed — the call is refused either way.
+ */
 export interface BudgetExceededResponse extends ErrorResponse {
   error: "budget_exceeded";
-  tx_hash: string;
+  tx_hash: string | null;
 }
 
 /** 502 — upstream non-2xx or timeout. The call is logged as upstream_failed and not settled. */

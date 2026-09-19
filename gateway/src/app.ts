@@ -5,14 +5,15 @@ import express, { type RequestHandler } from "express";
 import { createBootstrapHandler, type BootstrapDeps } from "./bootstrap.js";
 import { createEndpointRoutes, type EndpointRouteDeps } from "./endpointRoutes.js";
 import { errorHandler, HttpError, notFoundHandler, validate } from "./errors.js";
+import { createProxyHandler, type ProxyDeps } from "./proxyRoute.js";
 import { createReadRoutes, requireSeller, type ReadRouteDeps } from "./readRoutes.js";
 import * as schemas from "./schemas.js";
-import { AGENT_BUDGET_HEADER, type HealthResponse } from "./types.js";
+import type { HealthResponse } from "./types.js";
 
 dotenv.config({ quiet: true });
 
 /** Everything the routes talk to. index.ts wires the real ones; tests pass fakes. */
-export interface AppDeps extends BootstrapDeps, ReadRouteDeps, EndpointRouteDeps {
+export interface AppDeps extends BootstrapDeps, ReadRouteDeps, EndpointRouteDeps, ProxyDeps {
   /** Seller auth (createAuthMiddleware): 401 or sets req.privyUserId / req.seller. */
   authenticate: RequestHandler;
 }
@@ -79,11 +80,7 @@ export function createApp(deps: AppDeps, options: AppOptions = {}): express.Expr
   app.get("/api/calls", deps.authenticate, requireSeller, read.listCalls);
 
   // --- Agent side (x402) --------------------------------------------------------------------
-  app.get("/proxy/:proxy_slug", (req) => {
-    validate(schemas.proxyParams, req.params, "params");
-    validate(schemas.agentBudgetHeader, req.get(AGENT_BUDGET_HEADER), "headers");
-    notImplemented("GET /proxy/:proxy_slug");
-  });
+  app.get("/proxy/:proxy_slug", createProxyHandler(deps));
 
   app.use(notFoundHandler);
   app.use(errorHandler);

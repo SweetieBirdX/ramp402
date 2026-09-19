@@ -11,6 +11,7 @@ import { createDraftStore } from "./drafts.js";
 import { createFunder } from "./funding.js";
 import { createRepo, type Repo } from "./repo.js";
 import { unusedLedger } from "./testing/ledger.js";
+import { unusedGate, unusedProxyLedger } from "./testing/proxy.js";
 import { privyTestKeys, privyToken, TEST_PRIVY_APP_ID } from "./testing/privy.js";
 
 const WALLET = "GCN7VANEAHQJ2BA4FEGYLD7P444UW4SE4U3AR2NQCIO4M73L66XWILI6";
@@ -79,6 +80,8 @@ beforeEach(() => {
       readBalance: async () => 0n,
       drafts: createDraftStore(),
       ledger: unusedLedger,
+      gate: unusedGate,
+      proxyLedger: unusedProxyLedger,
       credentialCipher: createCredentialCipher("00".repeat(32)),
       funder: createFunder({
         accountExists: net.accountExists,

@@ -13,7 +13,7 @@ import {
   rpc,
   scValToNative,
   type Transaction,
-  type xdr,
+  xdr,
 } from "@stellar/stellar-sdk";
 
 /** Seconds an operator-signed transaction stays valid: it is signed and sent immediately. */
@@ -124,6 +124,17 @@ export function createStellarClient(config: StellarConfig) {
     }
   }
 
+  // One operator transaction at a time: each one reads the account's sequence number, so two in flight
+  // would collide (txBadSeq). A failure releases the queue for the next caller.
+  let operatorQueue: Promise<unknown> = Promise.resolve();
+  function withOperator<T>(fn: (op: Keypair) => Promise<T>): Promise<T> {
+    if (!operator) return Promise.reject(new Error("OPERATOR_SECRET_KEY is not configured"));
+    const op = operator;
+    const run = operatorQueue.then(() => fn(op));
+    operatorQueue = run.catch(() => undefined);
+    return run;
+  }
+
   function buildTx(
     source: Account,
     contractId: string,
@@ -220,13 +231,67 @@ export function createStellarClient(config: StellarConfig) {
       return submit(tx as Transaction);
     },
 
-    /** Builds, signs with the operator keypair and submits: record_call and settle. */
+    /**
+     * Builds, signs with the operator keypair and submits: record_call and settle. Operator calls run
+     * one at a time, so concurrent proxy requests never race for the same sequence number.
+     */
     async invokeAsOperator(method: string, args: xdr.ScVal[]): Promise<InvokeResult> {
-      if (!operator) throw new Error("OPERATOR_SECRET_KEY is not configured");
-      const source = await server.getAccount(operator.publicKey());
-      const prepared = await prepare(buildTx(source, config.contractId, method, args));
-      prepared.sign(operator);
-      return submit(prepared);
+      return withOperator(async (op) => {
+        const source = await server.getAccount(op.publicKey());
+        const prepared = await prepare(buildTx(source, config.contractId, method, args));
+        prepared.sign(op);
+        return submit(prepared);
+      });
+    },
+
+    /**
+     * Submits, as the operator, a call that simulation has already shown the contract will refuse, so
+     * the refusal is recorded ON-CHAIN with a transaction hash anyone can look up. A failed simulation
+     * returns no footprint, so it is borrowed from `footprintArgs`: the same method with arguments that
+     * succeed. That works because ramp_ledger keeps Budgets and Endpoints as whole-map entries — the
+     * keys a call touches do not depend on its arguments. Resolves with the hash once the network has
+     * rejected it; throws if the transaction unexpectedly succeeds or cannot be submitted at all.
+     */
+    async submitExpectedRejection(method: string, args: xdr.ScVal[], footprintArgs: xdr.ScVal[]): Promise<string> {
+      return withOperator(async (op) => {
+        const source = await server.getAccount(op.publicKey());
+        const probe = await server.simulateTransaction(buildTx(new Account(op.publicKey(), source.sequenceNumber()), config.contractId, method, footprintArgs));
+        if (rpc.Api.isSimulationError(probe)) {
+          throw new SorobanError("simulation", `footprint probe failed: ${probe.error}`, undefined, contractErrorCode(probe.error));
+        }
+        const resourceFee = Number(probe.minResourceFee);
+
+        // The operator is the transaction source, so its require_auth() is a source-account entry
+        // naming this exact invocation — built here for the REAL arguments, not the probe's.
+        const auth = new xdr.SorobanAuthorizationEntry({
+          credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(),
+          rootInvocation: new xdr.SorobanAuthorizedInvocation({
+            function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+              new xdr.InvokeContractArgs({
+                contractAddress: Address.fromString(config.contractId).toScAddress(),
+                functionName: method,
+                args,
+              }),
+            ),
+            subInvocations: [],
+          }),
+        });
+
+        const tx = new TransactionBuilder(source, { fee: String(Number(BASE_FEE) + resourceFee), networkPassphrase })
+          .addOperation(Operation.invokeContractFunction({ contract: config.contractId, function: method, args, auth: [auth] }))
+          .setSorobanData(probe.transactionData.setResourceFee(resourceFee).build())
+          .setTimeout(TX_TIMEOUT_SECONDS)
+          .build();
+        tx.sign(op);
+
+        try {
+          const result = await submit(tx);
+          throw new Error(`${method} was expected to be rejected on-chain but succeeded (tx ${result.txHash})`);
+        } catch (err) {
+          if (err instanceof SorobanError && err.stage === "execution" && err.txHash) return err.txHash;
+          throw err;
+        }
+      });
     },
 
     /**
