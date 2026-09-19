@@ -57,7 +57,10 @@ describe.skipIf(!ready)(`anchor off-ramp (network, ${anchorDomain ?? "unconfigur
         pollTimeoutMs: 240_000,
         onProgress: (p) => {
           progress.push(p);
-          console.log(`  [${p.anchorStatus}] ${p.message ?? ""}`.trimEnd());
+          // `anchorStatus` is absent until the anchor answers; our own stage fills the gap so the
+          // log reads as a sequence without either being mistaken for the other.
+          const label = p.anchorStatus ? `anchor:${p.anchorStatus}` : `ours:${p.stage}`;
+          console.log(`  [${label}] ${p.message ?? ""}`.trimEnd());
         },
       });
 

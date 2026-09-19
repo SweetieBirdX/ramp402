@@ -754,12 +754,15 @@ export default function DashboardPage() {
                 </p>
               </div>
 
+              {/* The destination account is the anchor's, not one we hold. We never receive an
+                  IBAN from the seller (no route carries one), so naming a bank here would be
+                  invention. The anchor's own reference below is the verifiable part. */}
               <div className="p-3 rounded-lg bg-white border border-emerald-200">
-                <p className="text-[11px] text-neutral-500 font-medium">Hedef Hesap &amp; Kanal:</p>
-                <p className="font-semibold text-neutral-800 truncate mt-0.5">
-                  {completedRecord.iban.slice(0, 10)}...{completedRecord.iban.slice(-4)}
+                <p className="text-[11px] text-neutral-500 font-medium">Banka Referansı:</p>
+                <p className="font-mono font-semibold text-neutral-800 truncate mt-0.5">
+                  {completedRecord.externalTransactionId ?? "—"}
                 </p>
-                <p className="text-[10px] text-neutral-500">Ziraat Bankası (FAST)</p>
+                <p className="text-[10px] text-neutral-500">Anchor tarafından bildirildi</p>
               </div>
             </div>
           </div>

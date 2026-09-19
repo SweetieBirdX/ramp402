@@ -9,6 +9,7 @@ import { caip2Network, createPaymentGate } from "./payments.js";
 import { createProxyLedger } from "./proxyLedger.js";
 import { getStellar, scv } from "./stellar.js";
 import { payoutConfigFromEnv } from "./anchor/payout.js";
+import { resolveAnchor, withdrawMinimum } from "./anchor/index.js";
 import { createWithdrawalJobs } from "./withdrawalJob.js";
 import { Keypair } from "@stellar/stellar-sdk";
 
@@ -57,6 +58,13 @@ const app = createApp({
   }),
   startAnchorFlow: (row) => withdrawalJobs.start(row),
   anchorHomeDomain,
+  // §1.5: read the anchor's own limit rather than assuming ours. It publishes none today, so the
+  // 1 USDC floor stands — but an anchor that raises it is honoured without a code change.
+  anchorMinimumStroops: async () => {
+    const anchor = await resolveAnchor(anchorHomeDomain);
+    const units = await withdrawMinimum(anchor, "USDC", "bank_account");
+    return units === undefined ? undefined : Math.round(units * 10_000_000);
+  },
 });
 
 const port = Number(process.env.PORT) || 3001;

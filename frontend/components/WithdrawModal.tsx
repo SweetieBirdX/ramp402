@@ -250,8 +250,6 @@ export interface CompletedWithdrawalRecord {
   /** Null unless the anchor actually returned one. */
   externalTransactionId: string | null;
   anchorTxId: string | null;
-  iban: string;
-  recipientName: string;
   completedAt: string;
 }
 
@@ -262,7 +260,6 @@ type ModalFlowState =
   | "submitting"
   | "polling"
   | "completed"
-  | "pending_trust"
   | "error";
 
 // 1 USDC in stroops (CONVENTIONS.md §1.5)
@@ -275,6 +272,22 @@ const MIN_WITHDRAW_STROOPS = BigInt(10_000_000);
  * anchor locked in its SEP-38 quote, which is what actually gets paid.
  */
 const MAX_POLL_FAILURES = 5;
+
+/**
+ * Turn a failed request into something a seller can act on.
+ *
+ * `ApiError.status === 0` is the client's "the request never reached anyone" — the gateway is down,
+ * the wrong port, no network. Its raw message is `fetch failed`, which tells a seller nothing, and
+ * it is the exact condition the old code used as its cue to fabricate a draft and march on to a
+ * fake completed withdrawal. It now says plainly that nothing happened.
+ */
+function describeRequestFailure(err: unknown, what: string): string {
+  if (err instanceof ApiError && err.status === 0) {
+    return `${what}: ödeme ağ geçidine ulaşılamıyor. Hiçbir işlem yapılmadı ve bakiyeniz olduğu gibi duruyor. Ağ geçidi çalışıyor mu kontrol edip tekrar deneyin.`;
+  }
+  if (err instanceof ApiError) return `${what}: ${err.message}`;
+  return `${what}: ${err instanceof Error ? err.message : String(err)}`;
+}
 
 // Deleted: generateDraftId, generateWithdrawalId, generateExternalTxId and generateAnchorTxId.
 // They manufactured plausible-looking ids — "TR-FAST-20260919-84729103" and the like — which were
@@ -293,8 +306,6 @@ export default function WithdrawModal({
   const { signRawHash } = useSignRawHash();
 
   // Form inputs
-  const [iban, setIban] = useState("TR33 0006 1005 1234 5678 9012 34");
-  const [recipientName, setRecipientName] = useState("Mert Bayazıt");
 
   // Flow State
   const [flowState, setFlowState] = useState<ModalFlowState>("form");
@@ -307,8 +318,6 @@ export default function WithdrawModal({
   const [externalTxId, setExternalTxId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copiedBankRef, setCopiedBankRef] = useState(false);
-  /** The anchor's claimable balance id, when a missing trustline produced one. */
-  const [claimableBalanceId, setClaimableBalanceId] = useState<string | null>(null);
   /** `?rehearsal=true` only, read through Next's hook rather than `window` in an effect. */
   const showRehearsalControls = useSearchParams().get("rehearsal") === "true";
 
@@ -351,7 +360,6 @@ export default function WithdrawModal({
     setWithdrawalId(null);
     setErrorMessage(null);
     setCopiedBankRef(false);
-    setClaimableBalanceId(null);
     setQuotedTry(null);
     setAnchorTxId(null);
     setExternalTxId(null);
@@ -403,11 +411,7 @@ export default function WithdrawModal({
       draftId = prep.draft_id;
     } catch (err: unknown) {
       setFlowState("error");
-      setErrorMessage(
-        err instanceof ApiError
-          ? err.message
-          : `Çekim taslağı hazırlanamadı — ağ geçidine ulaşılamadı. ${err instanceof Error ? err.message : ""}`.trim(),
-      );
+      setErrorMessage(describeRequestFailure(err, "Çekim taslağı hazırlanamadı"));
       return;
     }
 
@@ -443,11 +447,7 @@ export default function WithdrawModal({
       // No invented withdrawal_id. If the gateway did not record it, there is nothing to poll and
       // nothing was withdrawn — saying otherwise would be a lie the seller acts on.
       setFlowState("error");
-      setErrorMessage(
-        err instanceof ApiError
-          ? err.message
-          : `Çekim işlemi sunucuya iletilemedi. ${err instanceof Error ? err.message : ""}`.trim(),
-      );
+      setErrorMessage(describeRequestFailure(err, "Çekim işlemi sunucuya iletilemedi"));
       return;
     }
 
@@ -481,9 +481,6 @@ export default function WithdrawModal({
         if (pollRes.anchor_tx_id) {
           setAnchorTxId(pollRes.anchor_tx_id);
         }
-        if (pollRes.claimable_balance_id) {
-          setClaimableBalanceId(pollRes.claimable_balance_id);
-        }
 
         setSep6Status(resolvedStatus);
 
@@ -499,18 +496,10 @@ export default function WithdrawModal({
             amountTry: pollRes.quote_buy_amount ?? null,
             externalTransactionId: pollRes.external_transaction_id ?? null,
             anchorTxId: pollRes.anchor_tx_id ?? null,
-            iban,
-            recipientName,
             completedAt: new Date().toLocaleTimeString("tr-TR"),
           };
           saveCompletedWithdrawal(record);
           onSuccess?.(record);
-          return;
-        }
-
-        if (resolvedStatus === "pending_trust") {
-          stopPolling();
-          setFlowState("pending_trust");
           return;
         }
 
@@ -563,14 +552,17 @@ export default function WithdrawModal({
   };
 
   /**
-   * `pending_trust` means the anchor could not deliver because a USDC trustline is missing, and it
-   * has parked the funds in a claimable balance.
+   * There is no claimable-balance path here, and that is a statement about the anchor rather than
+   * a gap in the UI.
    *
-   * There is no claim button here, deliberately. Claiming requires the seller to sign a
-   * `claimClaimableBalance` operation, and neither the gateway nor this component has a flow for
-   * that yet — the previous implementation was a 1.2 second timer that declared success and wrote
-   * a completed record. What the UI can honestly do is surface the balance id the anchor gave us
-   * and let the seller claim it themselves; see the pending_trust panel below.
+   * tr-mock-anchor sets `pending_trust` only inside `if (b.tx.kind === 'deposit')`
+   * (src/core/sepstatus.ts:46), and serialises `claimable_balance_id` only on the deposit branch
+   * (:119). A WITHDRAWAL can return exactly four statuses — incomplete, pending_user_transfer_start,
+   * completed, error — so this screen could never reach a trustline state. Ramp402 has no deposit
+   * flow at all, so the deposit branch is unreachable too.
+   *
+   * The gateway still reads and stores `claimable_balance_id` if an anchor ever sends one; it is
+   * simply not something this modal can render today without inventing the circumstances.
    */
 
   /**
@@ -586,8 +578,6 @@ export default function WithdrawModal({
     setSep6Status(status);
     if (status === "completed") {
       setFlowState("completed");
-    } else if (status === "pending_trust") {
-      setFlowState("pending_trust");
     } else if (status === "error") {
       setFlowState("error");
       setErrorMessage("Anchor Infrastructure Error: The off-ramp service experienced a gateway timeout (SEP-6 HTTP 504).");
@@ -762,39 +752,17 @@ export default function WithdrawModal({
                 </div>
               )}
 
-              {/* IBAN and Bank Details */}
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                    Recipient IBAN (TR)
-                  </label>
-                  <div className="relative">
-                    <input
-                      type="text"
-                      value={iban}
-                      onChange={(e) => setIban(e.target.value)}
-                      placeholder="TR00 0000 0000 0000 0000 0000 00"
-                      className="w-full px-3.5 py-2.5 rounded-md border border-neutral-300 text-xs font-mono font-medium focus:ring-2 focus:ring-neutral-900 focus:border-transparent outline-hidden"
-                    />
-                    <BuildingBankIcon className="absolute right-3 top-2.5 h-4 w-4 text-neutral-400 pointer-events-none" />
-                  </div>
-                  <p className="text-[11px] text-neutral-500 mt-1">
-                    Direct bank wire via TCMB FAST network with instant 24/7 settlement.
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-neutral-700 mb-1">
-                    Account Holder Legal Name
-                  </label>
-                  <input
-                    type="text"
-                    value={recipientName}
-                    onChange={(e) => setRecipientName(e.target.value)}
-                    placeholder="Full Legal Name"
-                    className="w-full px-3.5 py-2.5 rounded-md border border-neutral-300 text-xs font-medium focus:ring-2 focus:ring-neutral-900 focus:border-transparent outline-hidden"
-                  />
-                </div>
+              {/* No IBAN or account-holder field.
+                  They used to be collected here, pre-filled with a fixed IBAN and a real person's
+                  name, shown on the receipt — and never sent anywhere. §1.3 gives
+                  POST /api/withdraw/prepare no request body, so there is no route to carry them,
+                  and the gateway sends SEP-12 an empty field map. The anchor pays the IBAN on its
+                  own customer record. Asking for a bank account and discarding it is worse than
+                  not asking: wiring it through needs a §1.3 change, which is the repo owner's. */}
+              <div className="p-3 rounded-md bg-neutral-50 border border-neutral-200">
+                <p className="text-[11px] text-neutral-600">
+                  Payout goes to the bank account registered with the anchor for this account.
+                </p>
               </div>
             </div>
           )}
@@ -829,51 +797,6 @@ export default function WithdrawModal({
                   <span className="font-semibold">{withdrawalId}</span>
                 </div>
               )}
-            </div>
-          )}
-
-          {/* Requirement 3: pending_trust (Claim Your Balance path) */}
-          {flowState === "pending_trust" && (
-            <div className="p-5 rounded-lg bg-amber-50 border border-amber-300 space-y-4">
-              <div className="flex items-start gap-3">
-                <AlertTriangleIcon className="h-6 w-6 text-amber-600 shrink-0 mt-0.5" />
-                <div>
-                  <h4 className="text-sm font-bold text-amber-900">
-                    Action Required: Missing Asset Trustline (pending_trust)
-                  </h4>
-                  <p className="text-xs text-amber-800 mt-1">
-                    The anchor could not transfer TRY directly because your Stellar account lacks a trustline for the asset. Your funds have been locked safely in a <strong>Stellar Claimable Balance</strong>.
-                  </p>
-                </div>
-              </div>
-
-              <div className="bg-white p-3.5 rounded-md border border-amber-200 text-xs space-y-2 text-neutral-700">
-                <p className="font-semibold text-neutral-900">Your claimable balance</p>
-                {claimableBalanceId ? (
-                  <>
-                    <p className="text-[11px] text-neutral-600">
-                      Add a USDC trustline to your account, then claim this balance. The anchor
-                      resumes the lira transfer once it settles.
-                    </p>
-                    <code className="block mt-1 p-2 rounded bg-neutral-50 border border-neutral-200 font-mono text-[10px] break-all text-neutral-800">
-                      {claimableBalanceId}
-                    </code>
-                    <a
-                      href={`https://stellar.expert/explorer/testnet/claimable-balance/${claimableBalanceId}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-block mt-1 text-[11px] font-semibold text-amber-800 underline hover:text-amber-900"
-                    >
-                      View it on stellar.expert →
-                    </a>
-                  </>
-                ) : (
-                  <p className="text-[11px] text-neutral-600">
-                    The anchor has not published a claimable balance id yet. Keep this window open —
-                    it appears here as soon as it does.
-                  </p>
-                )}
-              </div>
             </div>
           )}
 
@@ -936,8 +859,9 @@ export default function WithdrawModal({
                       <p className="font-mono font-semibold text-neutral-800 truncate">{anchorTxId ?? "—"}</p>
                     </div>
                     <div>
-                      <span className="text-neutral-400">Target IBAN:</span>
-                      <p className="font-mono font-semibold text-neutral-800">{iban.slice(0, 10)}...{iban.slice(-4)}</p>
+                      <span className="text-neutral-400">Paid Out:</span>
+                      {/* The anchor's own figure. The SEP-38 quote was an estimate. */}
+                      <p className="font-semibold text-neutral-800">{quotedTry ? `₺${quotedTry} TRY` : "—"}</p>
                     </div>
                     <div>
                       <span className="text-neutral-400">Settled Amount:</span>

@@ -18,8 +18,13 @@ import type {
 } from "./types.js";
 
 /**
- * The floor, in stroops: 1 USDC (§1.5). A LOWER BOUND, never a cap — anything below is refused
+ * Our floor, in stroops: 1 USDC (§1.5). A LOWER BOUND, never a cap — anything below is refused
  * with a clear message and nothing is ever silently clamped to it. We have got this wrong once.
+ *
+ * The anchor's own published minimum is consulted too (`anchorMinimumStroops`), and the higher of
+ * the two applies. tr-mock-anchor publishes none in its SEP-6 `/info` — it only states one in the
+ * `/withdraw` reply — so in practice this constant is the operative floor today, but an anchor
+ * demanding more than 1 USDC is honoured rather than ignored.
  */
 export const MIN_WITHDRAWAL_STROOPS = 10_000_000;
 
@@ -33,6 +38,12 @@ export interface WithdrawRouteDeps {
   startAnchorFlow: (withdrawal: WithdrawalRow) => void;
   /** The anchor a new withdrawal is routed to. */
   anchorHomeDomain: string;
+  /**
+   * The anchor's own published minimum, in stroops, or undefined when it publishes none.
+   * Injected so the unit suite stays offline. A throw here must not block a withdrawal: an
+   * unreachable anchor is the job's problem to report, not a reason to refuse at the door.
+   */
+  anchorMinimumStroops?: () => Promise<number | undefined>;
 }
 
 const draftGone = () =>
@@ -50,13 +61,28 @@ export function createWithdrawRoutes(deps: WithdrawRouteDeps) {
     if (balance <= 0) {
       throw new HttpError(400, "invalid_request", "There is nothing to withdraw: your balance is 0.");
     }
-    if (balance < MIN_WITHDRAWAL_STROOPS) {
-      // Say the real numbers. "Too small" without them sends the seller back to guess.
+
+    // Ask the anchor what IT requires, and take whichever floor is higher. Never a cap: whatever
+    // the floor turns out to be, the whole balance is withdrawn once it is cleared.
+    let anchorMinimum: number | undefined;
+    try {
+      anchorMinimum = await deps.anchorMinimumStroops?.();
+    } catch {
+      anchorMinimum = undefined; // unreachable anchor is the job's problem to report, not a refusal
+    }
+    const floor = Math.max(MIN_WITHDRAWAL_STROOPS, anchorMinimum ?? 0);
+
+    if (balance < floor) {
+      // Say the real numbers, and whose rule it is. "Too small" alone sends the seller back to guess.
+      const whose =
+        anchorMinimum !== undefined && anchorMinimum > MIN_WITHDRAWAL_STROOPS
+          ? `${deps.anchorHomeDomain} requires a minimum withdrawal of`
+          : "The minimum withdrawal is";
       throw new HttpError(
         400,
         "invalid_request",
-        `The anchor's minimum withdrawal is ${format(MIN_WITHDRAWAL_STROOPS)} USDC and your balance is ` +
-          `${format(balance)} USDC. Earn a little more and withdraw the full amount — we will not withdraw a partial one.`,
+        `${whose} ${format(floor)} USDC and your balance is ${format(balance)} USDC. ` +
+          `Earn a little more and withdraw the full amount — we will not withdraw a partial one.`,
       );
     }
 

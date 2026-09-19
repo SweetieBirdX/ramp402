@@ -1,6 +1,7 @@
 import {
   Keypair,
   Horizon,
+  StellarToml,
   TransactionBuilder,
   Operation,
   Asset,
@@ -21,8 +22,32 @@ import type { BudgetExceededResponse, UpstreamFailedResponse } from "./types";
 export const HORIZON_TESTNET_URL = "https://horizon-testnet.stellar.org";
 export const SOROBAN_TESTNET_RPC = "https://soroban-testnet.stellar.org";
 export const FRIENDBOT_URL = "https://friendbot.stellar.org";
-export const TESTNET_USDC_ISSUER = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
-export const TESTNET_USDC_ASSET = new Asset("USDC", TESTNET_USDC_ISSUER);
+/**
+ * The USDC issuer, discovered from the anchor's stellar.toml rather than hardcoded (§1.5) — the
+ * same way the gateway resolves it in `gateway/src/anchor/toml.ts`. The mainnet issuer differs, and
+ * an anchor may change its own, so a constant here is a bug waiting for a network switch.
+ *
+ * Resolved once and cached for the tab. The agent console is the only caller.
+ */
+let usdcAssetPromise: Promise<Asset> | undefined;
+
+export function anchorHomeDomain(): string {
+  return process.env.NEXT_PUBLIC_ANCHOR_HOME_DOMAIN?.trim() || "tr-mock-anchor.fly.dev";
+}
+
+export async function usdcAsset(): Promise<Asset> {
+  usdcAssetPromise ??= (async () => {
+    const domain = anchorHomeDomain();
+    const toml = await StellarToml.Resolver.resolve(domain);
+    const issuer = toml.CURRENCIES?.find((c: { code?: string; issuer?: string }) => c.code === "USDC")?.issuer;
+    if (!issuer) throw new Error(`${domain} lists no USDC issuer in its stellar.toml`);
+    return new Asset("USDC", issuer);
+  })().catch((err) => {
+    usdcAssetPromise = undefined; // never cache a failure; the anchor may just be restarting
+    throw err;
+  });
+  return usdcAssetPromise;
+}
 
 export interface AgentAccount {
   publicKey: string;
@@ -125,6 +150,7 @@ export async function getAgentBalances(publicKey: string): Promise<AgentBalances
     let xlm = "0";
     let usdc = "0";
     let hasTrustline = false;
+    const issuer = (await usdcAsset()).getIssuer();
 
     for (const b of account.balances) {
       if (b.asset_type === "native") {
@@ -133,7 +159,7 @@ export async function getAgentBalances(publicKey: string): Promise<AgentBalances
         "asset_code" in b &&
         b.asset_code === "USDC" &&
         "asset_issuer" in b &&
-        b.asset_issuer === TESTNET_USDC_ISSUER
+        b.asset_issuer === issuer
       ) {
         usdc = b.balance;
         hasTrustline = true;
@@ -188,8 +214,13 @@ export async function fundAgentWithUSDC(agent: AgentAccount): Promise<void> {
   if (!loaded) throw new Error("Agent account not visible on Horizon after Friendbot funding");
 
   let acc = await server.loadAccount(agent.publicKey);
+  const usdc = await usdcAsset();
   const hasTrustline = acc.balances.some(
-    (b) => "asset_code" in b && b.asset_code === "USDC"
+    (b) =>
+      "asset_code" in b &&
+      b.asset_code === "USDC" &&
+      "asset_issuer" in b &&
+      b.asset_issuer === usdc.getIssuer(),
   );
 
   // 2. Add USDC trustline if absent
@@ -198,7 +229,7 @@ export async function fundAgentWithUSDC(agent: AgentAccount): Promise<void> {
       fee: BASE_FEE,
       networkPassphrase: Networks.TESTNET,
     })
-      .addOperation(Operation.changeTrust({ asset: TESTNET_USDC_ASSET }))
+      .addOperation(Operation.changeTrust({ asset: usdc }))
       .setTimeout(TimeoutInfinite)
       .build();
     tx1.sign(kp);
@@ -218,7 +249,7 @@ export async function fundAgentWithUSDC(agent: AgentAccount): Promise<void> {
         sendAsset: Asset.native(),
         sendAmount: "200",
         destination: agent.publicKey,
-        destAsset: TESTNET_USDC_ASSET,
+        destAsset: usdc,
         destMin: "1.0",
       })
     )

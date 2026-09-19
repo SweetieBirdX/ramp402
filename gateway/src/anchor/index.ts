@@ -23,15 +23,43 @@ export { withdrawMinimum, toWithdrawalStatus } from "./sep6.js";
 export { AnchorError } from "./http.js";
 export { stroopsToDecimal } from "./payout.js";
 
-/** What the caller persists after each step. Every field is optional but `anchorStatus`. */
+/**
+ * What the caller persists after each step.
+ *
+ * `anchorStatus` is OPTIONAL and carries only what the anchor actually said. Before it has spoken
+ * the field is absent — never a guess. Earlier versions of this file reported invented values
+ * ("pending_anchor" while we authenticated, "pending_user_transfer_start" once we had instructions)
+ * into a column §1.4 documents as the anchor's word verbatim; the UI then showed SEP-6 states the
+ * anchor had never reported.
+ *
+ * `stage` is OUR narrative of where the flow is. It is ours, it is labelled as ours, and it is what
+ * the progress messages are for.
+ */
 export interface AnchorProgress {
-  anchorStatus: string;
+  /** Only ever `transaction.status` from the anchor. Absent until it answers. */
+  anchorStatus?: string;
+  /** Our own step name, for logs and for the seller's "what is happening" line. */
+  stage: AnchorStage;
   anchorTxId?: string;
   externalTransactionId?: string;
   claimableBalanceId?: string;
+  /** The SEP-38 quote: a pre-flight ESTIMATE, not the paid figure. */
   quoteBuyAmount?: string;
+  /** `amount_out` from the anchor — what it actually paid. Authoritative once present. */
+  amountOut?: string;
   message?: string;
 }
+
+/** Our own flow stages. Deliberately not SEP-6 names, so the two can never be confused. */
+export type AnchorStage =
+  | "authenticating"
+  | "quoting"
+  | "kyc"
+  | "initiating"
+  | "paying"
+  | "polling"
+  | "done"
+  | "failed";
 
 export interface WithdrawalFlowOptions {
   homeDomain: string;
@@ -51,11 +79,15 @@ export interface WithdrawalFlowOptions {
 
 export interface WithdrawalFlowResult {
   status: "completed" | "failed" | "pending";
-  anchorStatus: string;
+  /** Absent when the anchor never answered — e.g. we failed before reaching it. */
+  anchorStatus?: string;
   anchorTxId?: string;
   externalTransactionId?: string;
   claimableBalanceId?: string;
+  /** The SEP-38 estimate. */
   quoteBuyAmount?: string;
+  /** `amount_out` — what the anchor actually paid. Authoritative over the quote. */
+  amountOut?: string;
   message?: string;
 }
 
@@ -92,7 +124,7 @@ export async function runWithdrawalFlow(options: WithdrawalFlowOptions): Promise
   const pool = Keypair.fromSecret(payout.poolSecret);
   const account = pool.publicKey();
 
-  report({ anchorStatus: "pending_anchor", message: `authenticating with ${anchor.homeDomain}` });
+  report({ stage: "authenticating", message: `authenticating with ${anchor.homeDomain}` });
 
   // (b) SEP-10 — as the pool, for the reason documented in sep10.ts.
   await authenticate(anchor, pool, networkPassphrase);
@@ -105,9 +137,11 @@ export async function runWithdrawalFlow(options: WithdrawalFlowOptions): Promise
       requestQuote(anchor, token, { assetCode, sellAmount: amount, buyAsset }),
     );
     report({
-      anchorStatus: "pending_anchor",
+      stage: "quoting",
       quoteBuyAmount: quote.buyAmount,
-      message: `rate locked: ${amount} ${assetCode} → ${quote.buyAmount} ${buyAsset.replace("iso4217:", "")}`,
+      message:
+        `estimate: ${amount} ${assetCode} → ${quote.buyAmount} ${buyAsset.replace("iso4217:", "")} ` +
+        `(SEP-38 quote; the paid figure is the anchor's amount_out)`,
     });
   }
 
@@ -117,14 +151,14 @@ export async function runWithdrawalFlow(options: WithdrawalFlowOptions): Promise
       ensureCustomerAccepted(anchor, token, account, kycValues),
     );
     if (customer.status === "REJECTED") {
-      return fail(report, "error", `anchor rejected KYC: ${customer.message ?? "no reason given"}`);
+      return fail(report, `anchor rejected KYC: ${customer.message ?? "no reason given"}`);
     }
   }
 
   // (e) SEP-6 — get the account, memo and memo type to pay.
   const types = await withAuth(anchor, pool, networkPassphrase, () => withdrawTypes(anchor, assetCode));
   const type = types.includes("bank_account") ? "bank_account" : (types[0] as string | undefined);
-  if (!type) return fail(report, "error", `${anchor.homeDomain} offers no withdrawal method for ${assetCode}`);
+  if (!type) return fail(report, `${anchor.homeDomain} offers no withdrawal method for ${assetCode}`);
 
   // The quote may have aged while KYC was running. Spending an expired one is refused by the
   // anchor, so replace it rather than find out at the withdraw call.
@@ -133,15 +167,18 @@ export async function runWithdrawalFlow(options: WithdrawalFlowOptions): Promise
     quote = await withAuth(anchor, pool, networkPassphrase, (token) =>
       requestQuote(anchor, token, { assetCode, sellAmount: amount, buyAsset }),
     );
-    report({ anchorStatus: "pending_anchor", quoteBuyAmount: quote.buyAmount, message: "quote refreshed before payment" });
+    report({ stage: "quoting", quoteBuyAmount: quote.buyAmount, message: "quote refreshed before payment" });
   }
 
   const instructions = await withAuth(anchor, pool, networkPassphrase, (token) =>
     initiateWithdraw(anchor, token, { assetCode, type, amount, quoteId: quote?.id, account }),
   );
 
+  // No anchorStatus here. The anchor has given us instructions, not a transaction status; asking
+  // it for one is the poll's job. Reporting "pending_user_transfer_start" at this point was us
+  // predicting its answer.
   report({
-    anchorStatus: "pending_user_transfer_start",
+    stage: "initiating",
     anchorTxId: instructions.id,
     quoteBuyAmount: quote?.buyAmount,
     message: `anchor is waiting for ${amount} ${assetCode}`,
@@ -158,10 +195,10 @@ export async function runWithdrawalFlow(options: WithdrawalFlowOptions): Promise
       memoType: instructions.memoType,
     });
   } catch (err) {
-    return fail(report, "error", `paying the anchor failed: ${err instanceof Error ? err.message : String(err)}`, instructions.id);
+    return fail(report, `paying the anchor failed: ${err instanceof Error ? err.message : String(err)}`, instructions.id);
   }
 
-  report({ anchorStatus: "pending_anchor", anchorTxId: instructions.id, message: "payment sent, waiting for the anchor" });
+  report({ stage: "paying", anchorTxId: instructions.id, message: "payment sent, waiting for the anchor" });
 
   // (g) Poll until the anchor is done.
   return await pollUntilTerminal(anchor, pool, networkPassphrase, instructions.id, {
@@ -185,9 +222,9 @@ async function pollUntilTerminal(
   },
 ): Promise<WithdrawalFlowResult> {
   const deadline = Date.now() + opts.timeoutMs;
+  // No seeded anchorStatus. Until the first poll returns, the anchor has said nothing.
   let last: WithdrawalFlowResult = {
     status: "pending",
-    anchorStatus: "pending_anchor",
     anchorTxId,
     quoteBuyAmount: opts.quoteBuyAmount,
   };
@@ -204,15 +241,19 @@ async function pollUntilTerminal(
       externalTransactionId: tx.externalTransactionId,
       claimableBalanceId: tx.claimableBalanceId,
       quoteBuyAmount: opts.quoteBuyAmount,
+      // What the anchor actually paid out. The quote was an estimate; this is the figure.
+      amountOut: tx.amountOut,
       message: tx.message,
     };
 
     opts.report({
+      stage: "polling",
       anchorStatus: tx.status,
       anchorTxId,
       externalTransactionId: tx.externalTransactionId,
       claimableBalanceId: tx.claimableBalanceId,
       quoteBuyAmount: opts.quoteBuyAmount,
+      amountOut: tx.amountOut,
       message: tx.message,
     });
 
@@ -243,14 +284,18 @@ export async function resumePolling(options: {
   });
 }
 
+/**
+ * A failure on OUR side of the flow — authentication, KYC, the payment. `anchorStatus` stays
+ * absent: the anchor did not say "error", we did, and conflating the two would put a word in its
+ * mouth that its own transaction record does not contain.
+ */
 function fail(
   report: (p: AnchorProgress) => void,
-  anchorStatus: string,
   message: string,
   anchorTxId?: string,
 ): WithdrawalFlowResult {
-  report({ anchorStatus, anchorTxId, message });
-  return { status: "failed", anchorStatus, anchorTxId, message };
+  report({ stage: "failed", anchorTxId, message });
+  return { status: "failed", anchorTxId, message };
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

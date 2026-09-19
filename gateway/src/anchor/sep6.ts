@@ -132,21 +132,42 @@ export async function fetchTransaction(
   };
 }
 
-/** SEP-6 terminal states. Everything else means "still going". */
+/**
+ * The statuses this anchor can actually emit for a WITHDRAWAL, from the reference implementation's
+ * `sepStatusOf` (tr-mock-anchor `src/core/sepstatus.ts`):
+ *
+ *     if (!b.offramp)                              return 'incomplete';
+ *     if (b.offramp.status === 'awaiting_deposit') return 'pending_user_transfer_start';
+ *     if (b.offramp.status === 'completed')        return 'completed';
+ *     return 'error';
+ *
+ * Four, not eleven. `failed`, `refunded`, `expired`, `no_market`, `too_small` and `too_large` were
+ * handled here previously; the anchor never returns any of them on this branch, and carrying dead
+ * branches made the client look like it understood more than it did. `pending_trust` is likewise
+ * deposit-only (`onramp.pending_reason === 'awaiting_trust'`) and unreachable for a withdrawal.
+ *
+ * Kept deliberately open at the edges: an unrecognised status is treated as "still going" rather
+ * than guessed at, because a different anchor may say something we have never seen.
+ */
 export const TERMINAL_SUCCESS = "completed";
-export const TERMINAL_FAILURES = new Set(["error", "failed", "refunded", "expired", "no_market", "too_small", "too_large"]);
+export const TERMINAL_FAILURES = new Set(["error"]);
+/** Returned before an off-ramp row exists. Not terminal, and not a failure — the flow is early. */
+export const STATUS_INCOMPLETE = "incomplete";
 
 export function isTerminal(status: string): boolean {
   return status === TERMINAL_SUCCESS || TERMINAL_FAILURES.has(status);
 }
 
 /**
- * Map the anchor's vocabulary onto ours (§1.1): three lifecycle values, nothing more. Everything
- * that is not plainly finished is `pending` — including `pending_trust`, which is a reason a
- * withdrawal is still pending, not a state of its own.
+ * Map the anchor's vocabulary onto ours (§1.1): three lifecycle values, nothing more.
+ *
+ * `incomplete` maps to `pending` explicitly rather than by falling through the default. The anchor
+ * returns it when the off-ramp row does not exist yet, which is an early stage of a live
+ * withdrawal, not an error — reading it as a failure would abandon a withdrawal that is fine.
  */
 export function toWithdrawalStatus(anchorStatus: string): "pending" | "completed" | "failed" {
   if (anchorStatus === TERMINAL_SUCCESS) return "completed";
   if (TERMINAL_FAILURES.has(anchorStatus)) return "failed";
+  if (anchorStatus === STATUS_INCOMPLETE) return "pending";
   return "pending";
 }
