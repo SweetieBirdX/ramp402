@@ -107,15 +107,40 @@ export interface SubmitWithdrawResponse {
   status: "pending";
 }
 
+/**
+ * Standard SEP-6 Anchor Transaction Statuses (SEP-0006).
+ */
+export type Sep6Status =
+  | "pending_user_transfer_start"
+  | "pending_user_transfer_complete"
+  | "pending_external"
+  | "pending_anchor"
+  | "pending_stellar"
+  | "pending_trust"
+  | "pending_user"
+  | "completed"
+  | "refunded"
+  | "expired"
+  | "no_market"
+  | "too_small"
+  | "too_large"
+  | "error"
+  | "failed";
+
 /** GET /api/withdrawals/:id */
 export interface GetWithdrawalParams {
   id: string;
 }
 
 export interface GetWithdrawalResponse {
-  status: WithdrawalStatus;
+  status: WithdrawalStatus | Sep6Status;
+  anchor_status?: Sep6Status;
   anchor_tx_id?: string;
   external_transaction_id?: string;
+  amount_stroops?: number;
+  message?: string;
+  error_message?: string;
+  claimable_balance_id?: string;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -174,10 +199,13 @@ export interface MissingBudgetHeaderResponse extends ErrorResponse {
   error: "missing_budget_header";
 }
 
-/** 403 — budget exceeded; carries the hash of the rejected record_call transaction. */
+/**
+ * 403 — budget exceeded. tx_hash is the record_call transaction the contract rejected ON-CHAIN;
+ * null only if recording that rejection itself failed — the call is refused either way.
+ */
 export interface BudgetExceededResponse extends ErrorResponse {
   error: "budget_exceeded";
-  tx_hash: string;
+  tx_hash: string | null;
 }
 
 /** 502 — upstream non-2xx or timeout. The call is logged as upstream_failed and not settled. */

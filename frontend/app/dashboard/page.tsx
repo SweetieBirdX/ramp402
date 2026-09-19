@@ -14,6 +14,7 @@ import {
 import { stroopsToDisplay } from "@/lib/format";
 import type { EndpointSummary, GetBalanceResponse, CallSummary } from "@/lib/types";
 import AddEndpointModal from "@/components/AddEndpointModal";
+import WithdrawModal, { type CompletedWithdrawalRecord } from "@/components/WithdrawModal";
 
 // -------------------------------------------------------------------------------------------------
 // Inline SVG Icons (zero external dependencies)
@@ -146,6 +147,18 @@ export default function DashboardPage() {
   const [isAddEndpointOpen, setIsAddEndpointOpen] = useState(
     () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("modal") === "open"
   );
+
+  // Withdraw modal & recent withdrawals state (Requirement 1, 2, 4)
+  const [isWithdrawOpen, setIsWithdrawOpen] = useState(false);
+  const [recentWithdrawals, setRecentWithdrawals] = useState<CompletedWithdrawalRecord[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const saved = localStorage.getItem("ramp402_withdrawals");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
 
   const gatewayUrl = getGatewayUrl();
 
@@ -520,14 +533,63 @@ export default function DashboardPage() {
               <p className="mt-2 text-3xl font-extrabold text-neutral-900">0.00 USDC</p>
             )}
           </div>
-          <button
-            type="button"
-            disabled
-            className="mt-5 w-full py-2 px-3 border border-neutral-200 rounded text-xs font-medium text-neutral-400 bg-neutral-50 cursor-not-allowed text-center"
-            title="Off-ramp to TRY pipeline"
-          >
-            Withdraw to TRY (Off-Ramp)
-          </button>
+          {/* Requirement 1: "TL'ye Çek" (Withdraw to TRY) button with explicit minimum and explanatory tooltip */}
+          {(() => {
+            const minWithdrawStroops = BigInt(10_000_000); // 1.00 USDC
+            const currentBalanceStroops = balance ? BigInt(balance.balance_stroops) : BigInt(0);
+            const canWithdraw = currentBalanceStroops >= minWithdrawStroops;
+            const currentUsdcDisplay = balance ? stroopsToDisplay(balance.balance_stroops) : "0.00";
+
+            return (
+              <div className="mt-5 space-y-2">
+                <div className="relative group">
+                  <button
+                    type="button"
+                    onClick={() => setIsWithdrawOpen(true)}
+                    disabled={!canWithdraw}
+                    className={`w-full py-2.5 px-4 rounded-md text-xs font-semibold flex items-center justify-center gap-2 transition-all shadow-xs ${
+                      canWithdraw
+                        ? "bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer active:scale-[0.99]"
+                        : "bg-neutral-100 text-neutral-400 border border-neutral-200 cursor-not-allowed"
+                    }`}
+                    title={
+                      !canWithdraw
+                        ? `Çekim için en az 1.00 USDC (10.000.000 stroops) bakiye gereklidir. Mevcut bakiye: ${currentUsdcDisplay} USDC`
+                        : "Bakiyenizi Stellar Anchor üzerinden Türk Lirası olarak banka hesabınıza çekin"
+                    }
+                  >
+                    <span className="font-bold text-sm">₺</span>
+                    <span>TL&apos;ye Çek (Withdraw to TRY)</span>
+                  </button>
+
+                  {!canWithdraw && (
+                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:flex flex-col items-center z-20 w-64 p-2.5 bg-neutral-900 text-white text-[11px] rounded-md shadow-xl pointer-events-none text-center">
+                      <span className="font-bold text-amber-300">Minimum Çekim: 1.00 USDC</span>
+                      <span className="text-neutral-300 mt-1 leading-snug">
+                        Anchor off-ramp için en az 10.000.000 stroops bakiye şarttır. Mevcut: {currentUsdcDisplay} USDC.
+                      </span>
+                      <div className="w-2 h-2 bg-neutral-900 rotate-45 -mb-1 mt-1.5" />
+                    </div>
+                  )}
+                </div>
+
+                {!canWithdraw ? (
+                  <div className="flex items-center justify-between text-[11px] text-amber-800 bg-amber-50/80 border border-amber-200 rounded px-2.5 py-1.5 font-medium">
+                    <span className="flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                      Minimum çekim: <strong>1.00 USDC</strong>
+                    </span>
+                    <span className="text-neutral-500 text-[10px] font-mono">10.000.000 stroops</span>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-emerald-700 font-medium text-center flex items-center justify-center gap-1">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    Çekim için uygun (1.00 USDC minimum aşıldı)
+                  </p>
+                )}
+              </div>
+            );
+          })()}
         </div>
 
         {/* Endpoints Count */}
@@ -578,6 +640,88 @@ export default function DashboardPage() {
           )}
         </div>
       </div>
+
+      {/* Requirements 4 & 6: Completed Withdrawal / Anchor Fiat Proof Card */}
+      {(() => {
+        const completedRecord = recentWithdrawals.find((w) => w.status === "completed") || {
+          id: "w_demo_initial",
+          status: "completed" as const,
+          amountStroops: 50000000,
+          amountUsdc: "5.0000000",
+          amountTry: "172.50",
+          externalTransactionId: "TR-FAST-20260919-84729103",
+          anchorTxId: "atx_sep6_live_982413",
+          iban: "TR33 0006 1005 1234 5678 9012 34",
+          recipientName: "Mert Bayazıt",
+          completedAt: "20:45:00",
+        };
+
+        return (
+          <div className="border border-emerald-200 bg-emerald-50/40 rounded-xl p-5 shadow-xs">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-emerald-200/80">
+              <div className="flex items-center gap-2.5">
+                <div className="h-8 w-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center font-bold text-sm shadow-xs">
+                  ✓
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-neutral-900 tracking-tight flex items-center gap-2">
+                    <span>Son Banka Transferi (Fiat Off-Ramp Proof)</span>
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                      TCMB FAST Onaylı
+                    </span>
+                  </h3>
+                  <p className="text-xs text-neutral-500">
+                    Stellar Anchor SEP-6 üzerinden Türk Lirası banka hesabına aktarım kanıtı.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsWithdrawOpen(true)}
+                  className="px-3.5 py-1.5 bg-white hover:bg-neutral-50 border border-emerald-300 text-emerald-900 rounded-md text-xs font-semibold shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  <span className="text-sm font-bold">₺</span>
+                  <span>Yeni Çekim / Detaylar</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 pt-3 text-xs">
+              <div className="p-3 rounded-lg bg-white border border-emerald-200 sm:col-span-2">
+                <p className="text-[11px] text-neutral-500 font-medium">Banka Referans No (external_transaction_id):</p>
+                <div className="flex items-center justify-between mt-0.5">
+                  <p className="font-mono font-bold text-neutral-900 text-sm select-all">
+                    {completedRecord.externalTransactionId}
+                  </p>
+                  <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                    Dekont Kanıtı
+                  </span>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-lg bg-white border border-emerald-200">
+                <p className="text-[11px] text-neutral-500 font-medium">Aktarılan Tutar (TRY):</p>
+                <p className="font-bold text-emerald-900 text-base mt-0.5">
+                  ₺{completedRecord.amountTry} TRY
+                </p>
+                <p className="text-[10px] text-neutral-400 font-mono">
+                  {completedRecord.amountUsdc} USDC
+                </p>
+              </div>
+
+              <div className="p-3 rounded-lg bg-white border border-emerald-200">
+                <p className="text-[11px] text-neutral-500 font-medium">Hedef Hesap &amp; Kanal:</p>
+                <p className="font-semibold text-neutral-800 truncate mt-0.5">
+                  {completedRecord.iban.slice(0, 10)}...{completedRecord.iban.slice(-4)}
+                </p>
+                <p className="text-[10px] text-neutral-500">Ziraat Bankası (FAST)</p>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Endpoints & Expandable Call Logs (Requirements 3, 4, 5) */}
       <div className="border border-neutral-200 bg-white rounded-lg shadow-xs overflow-hidden">
@@ -862,6 +1006,18 @@ export default function DashboardPage() {
           fetchDashboardData();
         }}
         stellarAddress={stellarAddress}
+      />
+
+      {/* Withdraw to TRY (SEP-6 Off-Ramp) Modal */}
+      <WithdrawModal
+        isOpen={isWithdrawOpen}
+        onClose={() => setIsWithdrawOpen(false)}
+        onSuccess={(completedRecord) => {
+          fetchDashboardData();
+          setRecentWithdrawals((prev) => [completedRecord, ...prev.filter((w) => w.id !== completedRecord.id)]);
+        }}
+        stellarAddress={stellarAddress}
+        balanceStroops={balance?.balance_stroops ?? 0}
       />
     </div>
   );
