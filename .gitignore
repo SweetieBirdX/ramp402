@@ -1,0 +1,37 @@
+# Rename this file to .gitignore in the repo root.
+# It must exist BEFORE the first commit — a secret committed once stays in the history.
+
+# dependencies / build output
+node_modules/
+target/
+dist/
+.next/
+out/
+
+# local database (SQLite cache — the chain is the source of truth)
+*.db
+*.db-wal
+*.db-shm
+
+# secrets — never committed. The .example files ARE committed.
+.env
+.env.local
+.env.*.local
+!.env.example
+!.env.local.example
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Rust
+**/*.rs.bk
+Cargo.lock
+
+# misc
+*.log
+coverage/
+.turbo/

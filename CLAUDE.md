@@ -52,7 +52,8 @@ Only Efe edits `docs/CONVENTIONS.md`, and only after the three of them have agre
 
 Strict folder ownership is what keeps merge conflicts near zero with three people pushing to one
 branch. If a fix appears to need a change in someone else's folder, do not make it: describe the
-change and tell the human to pass it to that person.
+change and tell the human to pass it to that person. Reading another person's files is always
+fine — editing them is not.
 
 **README.md is sectioned by owner.** Efe owns `## Contract`. Ömer owns `## Setup` and `## Gateway`.
 Mert owns `## Frontend` and `## Demo`. Everything else (title, description, architecture, team) is
@@ -76,8 +77,8 @@ invisible when the demo runs.
     git commit -m "[Name] what was done"
     git push origin main
 
-Then push. Do not sit on local commits — unpushed work is invisible to the other two and turns
-into a conflict later.
+Push immediately after committing. Do not sit on local commits — unpushed work is invisible to the
+other two and turns into a conflict later.
 
 Commit message format is `[Name] what was done`, e.g. `[Ömer] gateway: x402 proxy flow + budget tests`.
 
