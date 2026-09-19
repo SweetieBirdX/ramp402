@@ -20,6 +20,7 @@ import {
   Keypair,
   Networks,
   Operation,
+  TimeoutInfinite,
   TransactionBuilder,
   nativeToScVal,
   rpc,
@@ -102,7 +103,7 @@ async function buildInvocation(
   const account = await server.getAccount(source.publicKey());
   return new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE })
     .addOperation(contract.call(method, ...args))
-    .setTimeout(60)
+    .setTimeout(TimeoutInfinite)
     .build();
 }
 
@@ -200,7 +201,7 @@ export async function ensureTrustline(
     networkPassphrase: NETWORK_PASSPHRASE,
   })
     .addOperation(Operation.changeTrust({ asset }))
-    .setTimeout(60)
+    .setTimeout(TimeoutInfinite)
     .build();
 
   tx.sign(keypair);
