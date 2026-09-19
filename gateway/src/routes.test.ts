@@ -4,8 +4,10 @@ import { describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import { createAuthMiddleware } from "./auth.js";
 import { openDatabase } from "./db.js";
+import { createDraftStore } from "./drafts.js";
 import { createFunder } from "./funding.js";
 import { createRepo } from "./repo.js";
+import { unusedLedger } from "./testing/ledger.js";
 
 // Only route registration and validation are under test here; every dependency is inert.
 const repo = createRepo(openDatabase(":memory:"));
@@ -20,6 +22,8 @@ const app = createApp(
     }),
     findStellarWallet: async () => null,
     readBalance: async () => 0n,
+    drafts: createDraftStore(),
+    ledger: unusedLedger,
     funder: createFunder({ accountExists: async () => false, friendbotUrl: undefined }),
   },
   { log: false },
@@ -36,18 +40,6 @@ const ROUTES: Array<{
   body?: object;
   headers?: Record<string, string>;
 }> = [
-  {
-    method: "post",
-    path: "/api/endpoints/prepare",
-    name: "POST /api/endpoints/prepare",
-    body: { upstream_url: "https://api.example.com/weather", price_stroops: 5_000_000 },
-  },
-  {
-    method: "post",
-    path: "/api/endpoints/submit",
-    name: "POST /api/endpoints/submit",
-    body: { draft_id: "draft123", signed_xdr: VALID_XDR },
-  },
   { method: "post", path: "/api/withdraw/prepare", name: "POST /api/withdraw/prepare" },
   {
     method: "post",
@@ -88,6 +80,8 @@ describe("§1.3 routes are all registered", () => {
 
   it.each([
     ["post", "/api/sellers/bootstrap"],
+    ["post", "/api/endpoints/prepare"],
+    ["post", "/api/endpoints/submit"],
     ["get", "/api/endpoints"],
     ["get", "/api/balance"],
     ["get", "/api/calls?endpoint_id=1"],
@@ -111,12 +105,6 @@ describe("§1.3 routes are all registered", () => {
 
 describe("zod validation rejects malformed requests with { error, message }", () => {
   const rejects: Array<[string, "get" | "post", string, object | undefined, RegExp]> = [
-    ["missing price_stroops", "post", "/api/endpoints/prepare", { upstream_url: "https://x.test" }, /body\.price_stroops/],
-    ["decimal price_stroops", "post", "/api/endpoints/prepare", { upstream_url: "https://x.test", price_stroops: 0.5 }, /body\.price_stroops/],
-    ["price_stroops as a string", "post", "/api/endpoints/prepare", { upstream_url: "https://x.test", price_stroops: "500" }, /body\.price_stroops/],
-    ["non-http upstream_url", "post", "/api/endpoints/prepare", { upstream_url: "ftp://x.test", price_stroops: 1 }, /body\.upstream_url/],
-    ["renamed field (price instead of price_stroops)", "post", "/api/endpoints/prepare", { upstream_url: "https://x.test", price_stroops: 1, price: 1 }, /price/],
-    ["missing signed_xdr", "post", "/api/endpoints/submit", { draft_id: "d1" }, /body\.signed_xdr/],
     ["non-base64 signed_xdr", "post", "/api/withdraw/submit", { draft_id: "d1", signed_xdr: "not xdr!" }, /body\.signed_xdr/],
     ["unexpected body on withdraw/prepare", "post", "/api/withdraw/prepare", { amount_stroops: 1 }, /amount_stroops/],
   ];

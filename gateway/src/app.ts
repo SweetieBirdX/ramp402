@@ -3,6 +3,7 @@
 import dotenv from "dotenv";
 import express, { type RequestHandler } from "express";
 import { createBootstrapHandler, type BootstrapDeps } from "./bootstrap.js";
+import { createEndpointRoutes, type EndpointRouteDeps } from "./endpointRoutes.js";
 import { errorHandler, HttpError, notFoundHandler, validate } from "./errors.js";
 import { createReadRoutes, requireSeller, type ReadRouteDeps } from "./readRoutes.js";
 import * as schemas from "./schemas.js";
@@ -11,7 +12,7 @@ import { AGENT_BUDGET_HEADER, type HealthResponse } from "./types.js";
 dotenv.config({ quiet: true });
 
 /** Everything the routes talk to. index.ts wires the real ones; tests pass fakes. */
-export interface AppDeps extends BootstrapDeps, ReadRouteDeps {
+export interface AppDeps extends BootstrapDeps, ReadRouteDeps, EndpointRouteDeps {
   /** Seller auth (createAuthMiddleware): 401 or sets req.privyUserId / req.seller. */
   authenticate: RequestHandler;
 }
@@ -51,15 +52,9 @@ export function createApp(deps: AppDeps, options: AppOptions = {}): express.Expr
   app.post("/api/sellers/bootstrap", deps.authenticate, createBootstrapHandler(deps));
 
   // --- Endpoint registration (two-step) -----------------------------------------------------
-  app.post("/api/endpoints/prepare", (req) => {
-    validate(schemas.prepareEndpointRequest, req.body, "body");
-    notImplemented("POST /api/endpoints/prepare");
-  });
-
-  app.post("/api/endpoints/submit", (req) => {
-    validate(schemas.submitEndpointRequest, req.body, "body");
-    notImplemented("POST /api/endpoints/submit");
-  });
+  const endpoints = createEndpointRoutes(deps);
+  app.post("/api/endpoints/prepare", deps.authenticate, requireSeller, endpoints.prepare);
+  app.post("/api/endpoints/submit", deps.authenticate, requireSeller, endpoints.submit);
 
   // --- Withdrawal (two-step, then poll) -----------------------------------------------------
   app.post("/api/withdraw/prepare", (req) => {

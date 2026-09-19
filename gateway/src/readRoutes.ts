@@ -5,6 +5,7 @@ import { HttpError, validate } from "./errors.js";
 import type { Repo } from "./repo.js";
 import * as schemas from "./schemas.js";
 import type { CallSummary, EndpointSummary, GetBalanceResponse, ListCallsResponse, ListEndpointsResponse } from "./types.js";
+import { redactUpstreamUrl } from "./upstream.js";
 
 export const CALLS_PAGE_LIMIT = 100;
 
@@ -14,29 +15,7 @@ export interface ReadRouteDeps {
   readBalance: (stellarAddress: string) => Promise<bigint>;
 }
 
-/** Query parameter names whose values are treated as credentials. */
-const SECRET_PARAM = /key|token|secret|pass|auth|sig|credential|session/i;
-
-/**
- * upstream_url as shown to the dashboard: userinfo (user:pass@) and the values of secret-looking
- * query parameters are replaced, so a key embedded in the URL never reaches a browser.
- */
-export function redactUpstreamUrl(raw: string): string {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return "[invalid url]";
-  }
-  if (url.username || url.password) {
-    url.username = "";
-    url.password = "";
-  }
-  for (const name of [...new Set(url.searchParams.keys())]) {
-    if (SECRET_PARAM.test(name)) url.searchParams.set(name, "REDACTED");
-  }
-  return url.toString();
-}
+export { redactUpstreamUrl };
 
 /** After authenticate: 403 unless the Privy user has bootstrapped a seller row. */
 export const requireSeller: RequestHandler = (req, _res, next) => {

@@ -1,8 +1,8 @@
 // In-memory store for the two-step XDR flow (CONVENTIONS.md §1.3): /prepare saves what it built
 // under a draft_id, /submit looks it up. Drafts are short-lived and lost on restart by design —
-// the unsigned transaction they describe expires on-chain after TX_TIMEOUT_SECONDS anyway.
+// the unsigned transaction they describe expires on-chain after SIGNING_TIMEOUT_SECONDS anyway.
 import { nanoid } from "nanoid";
-import { TX_TIMEOUT_SECONDS } from "./stellar.js";
+import { SIGNING_TIMEOUT_SECONDS } from "./stellar.js";
 
 interface DraftBase {
   /** The seller who prepared it; /submit must reject a draft presented by anyone else. */
@@ -29,7 +29,8 @@ export interface DraftStoreOptions {
   now?: () => number;
 }
 
-export const DEFAULT_DRAFT_TTL_MS = TX_TIMEOUT_SECONDS * 1000;
+/** 10 minutes: the same lifetime as the unsigned transaction the draft describes. */
+export const DEFAULT_DRAFT_TTL_MS = SIGNING_TIMEOUT_SECONDS * 1000;
 
 export function createDraftStore(options: DraftStoreOptions = {}) {
   const ttlMs = options.ttlMs ?? DEFAULT_DRAFT_TTL_MS;

@@ -6,8 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import { createAuthMiddleware, createPrivyVerifier } from "./auth.js";
 import { openDatabase, type DbHandle } from "./db.js";
+import { createDraftStore } from "./drafts.js";
 import { createFunder } from "./funding.js";
 import { createRepo, type Repo } from "./repo.js";
+import { unusedLedger } from "./testing/ledger.js";
 import { privyTestKeys, privyToken, TEST_PRIVY_APP_ID } from "./testing/privy.js";
 
 const WALLET = "GCN7VANEAHQJ2BA4FEGYLD7P444UW4SE4U3AR2NQCIO4M73L66XWILI6";
@@ -74,6 +76,8 @@ beforeEach(() => {
         return wallets.get(privyUserId) ?? null;
       },
       readBalance: async () => 0n,
+      drafts: createDraftStore(),
+      ledger: unusedLedger,
       funder: createFunder({
         accountExists: net.accountExists,
         friendbotUrl: FRIENDBOT,

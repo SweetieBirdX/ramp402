@@ -6,9 +6,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import { createAuthMiddleware, createPrivyVerifier } from "./auth.js";
 import { openDatabase, type DbHandle } from "./db.js";
+import { createDraftStore } from "./drafts.js";
 import { createFunder } from "./funding.js";
 import { redactUpstreamUrl } from "./readRoutes.js";
 import { createRepo, type Repo, type SellerRow } from "./repo.js";
+import { unusedLedger } from "./testing/ledger.js";
 import { privyTestKeys, privyToken, TEST_PRIVY_APP_ID } from "./testing/privy.js";
 
 // Public testnet-format addresses only; no secret keys in fixtures.
@@ -62,6 +64,8 @@ beforeEach(() => {
       authenticate: createAuthMiddleware({ verifyToken, repo }),
       findStellarWallet: async () => null,
       funder: createFunder({ accountExists: async () => true, friendbotUrl: undefined }),
+      drafts: createDraftStore(),
+      ledger: unusedLedger,
       readBalance: async (address) => {
         balanceReads.push(address);
         return balances.get(address) ?? 0n;

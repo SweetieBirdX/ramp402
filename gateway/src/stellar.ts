@@ -16,8 +16,14 @@ import {
   type xdr,
 } from "@stellar/stellar-sdk";
 
-/** Seconds a built transaction stays valid. The draft store TTL must not outlive it. */
+/** Seconds an operator-signed transaction stays valid: it is signed and sent immediately. */
 export const TX_TIMEOUT_SECONDS = 300;
+
+/**
+ * Seconds an unsigned /prepare transaction stays valid while it waits for the seller to sign it.
+ * The draft store keeps its draft exactly this long; a draft must never outlive its transaction.
+ */
+export const SIGNING_TIMEOUT_SECONDS = 600;
 
 export interface StellarConfig {
   rpcUrl: string;
@@ -118,10 +124,16 @@ export function createStellarClient(config: StellarConfig) {
     }
   }
 
-  function buildTx(source: Account, contractId: string, method: string, args: xdr.ScVal[]): Transaction {
+  function buildTx(
+    source: Account,
+    contractId: string,
+    method: string,
+    args: xdr.ScVal[],
+    timeoutSeconds = TX_TIMEOUT_SECONDS,
+  ): Transaction {
     return new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase })
       .addOperation(Operation.invokeContractFunction({ contract: contractId, function: method, args }))
-      .setTimeout(TX_TIMEOUT_SECONDS)
+      .setTimeout(timeoutSeconds)
       .build();
   }
 
@@ -175,7 +187,7 @@ export function createStellarClient(config: StellarConfig) {
      */
     async buildUnsignedInvoke(contractId: string, method: string, args: xdr.ScVal[], sourceAccount: string): Promise<string> {
       const source = await server.getAccount(sourceAccount);
-      const prepared = await prepare(buildTx(source, contractId, method, args));
+      const prepared = await prepare(buildTx(source, contractId, method, args, SIGNING_TIMEOUT_SECONDS));
       return prepared.toXDR();
     },
 
@@ -188,6 +200,15 @@ export function createStellarClient(config: StellarConfig) {
         if (err instanceof Error && err.message.startsWith("Account not found")) return false;
         throw err;
       }
+    },
+
+    /**
+     * Hex hash of an envelope. Signatures are not part of it, so a prepared transaction and the same
+     * transaction after signing hash identically: that is how /submit proves it got back what it built.
+     * Throws on anything that is not a transaction envelope for this network.
+     */
+    transactionHash(envelopeXdr: string): string {
+      return Buffer.from(TransactionBuilder.fromXDR(envelopeXdr, networkPassphrase).hash()).toString("hex");
     },
 
     /** Parses a signed envelope, submits it and waits for the result. */
