@@ -58,17 +58,19 @@ export function createApp(deps: AppDeps, options: AppOptions = {}): express.Expr
   app.post("/api/endpoints/submit", deps.authenticate, requireSeller, endpoints.submit);
 
   // --- Withdrawal (two-step, then poll) -----------------------------------------------------
-  app.post("/api/withdraw/prepare", (req) => {
+  // Seller routes: authenticated like the rest even while stubbed, so no client ever learns to
+  // call them without a token.
+  app.post("/api/withdraw/prepare", deps.authenticate, requireSeller, (req) => {
     validate(schemas.prepareWithdrawRequest, req.body ?? {}, "body");
     notImplemented("POST /api/withdraw/prepare");
   });
 
-  app.post("/api/withdraw/submit", (req) => {
+  app.post("/api/withdraw/submit", deps.authenticate, requireSeller, (req) => {
     validate(schemas.submitWithdrawRequest, req.body, "body");
     notImplemented("POST /api/withdraw/submit");
   });
 
-  app.get("/api/withdrawals/:id", (req) => {
+  app.get("/api/withdrawals/:id", deps.authenticate, requireSeller, (req) => {
     validate(schemas.getWithdrawalParams, req.params, "params");
     notImplemented("GET /api/withdrawals/:id");
   });
