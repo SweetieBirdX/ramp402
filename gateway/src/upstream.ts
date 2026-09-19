@@ -2,8 +2,24 @@
 // query parameters whose names look secret (api_key, token, sig, ...). One definition, used both
 // to split them off at registration and to redact them for display.
 
-/** Query parameter names whose values are treated as credentials. */
-const SECRET_PARAM = /key|token|secret|pass|auth|sig|credential|session/i;
+/** Whole words that mark a query parameter as a credential. */
+const SECRET_WORDS = new Set([
+  "key", "apikey", "token", "accesstoken", "apitoken", "secret", "pass", "passwd", "password", "pwd",
+  "auth", "authorization", "sig", "signature", "credential", "credentials", "session", "sessionid",
+]);
+
+/**
+ * Whether a parameter name is a credential. Matches whole words only, after splitting on `_`, `-`,
+ * `.` and camelCase: `api_key`, `X-Api-Key`, `accessToken`, `client_secret` and `sig` match;
+ * `keyword`, `design` and `passengers` do not, so ordinary parameters are never stripped or redacted.
+ */
+export function isSecretParam(name: string): boolean {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .some((word) => SECRET_WORDS.has(word));
+}
 
 export interface UpstreamCredentials {
   username?: string;
@@ -29,7 +45,7 @@ export function splitUpstreamCredentials(raw: string): SplitUpstreamUrl {
   url.password = "";
 
   for (const name of [...new Set(url.searchParams.keys())]) {
-    if (!SECRET_PARAM.test(name)) continue;
+    if (!isSecretParam(name)) continue;
     (credentials.query ??= {})[name] = url.searchParams.getAll(name);
     url.searchParams.delete(name);
   }
@@ -51,7 +67,7 @@ export function redactUpstreamUrl(raw: string): string {
   url.username = "";
   url.password = "";
   for (const name of [...new Set(url.searchParams.keys())]) {
-    if (SECRET_PARAM.test(name)) url.searchParams.set(name, "REDACTED");
+    if (isSecretParam(name)) url.searchParams.set(name, "REDACTED");
   }
   return url.toString();
 }

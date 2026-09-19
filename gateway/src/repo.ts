@@ -16,7 +16,10 @@ export interface SellerRow {
 export interface EndpointRow {
   id: string;
   seller_id: string;
+  /** Credential-free; safe to show in the UI (CONVENTIONS.md §1.4). */
   upstream_url: string;
+  /** "v1:…" AES-256-GCM ciphertext, or null. Never leaves the gateway: only the proxy decrypts it. */
+  upstream_credentials_enc: string | null;
   proxy_slug: string;
   price_stroops: number;
   created_at: string;
@@ -97,12 +100,20 @@ export function createRepo({ db, stmts }: DbHandle) {
       endpoint_id: EndpointId;
       seller_id: string;
       upstream_url: string;
+      upstream_credentials_enc?: string | null;
       proxy_slug: string;
       price_stroops: number;
     }): EndpointRow {
       assertStroops("price_stroops", input.price_stroops);
       const id = endpointIdToString(input.endpoint_id);
-      stmts.insertEndpoint.run(id, input.seller_id, input.upstream_url, input.proxy_slug, input.price_stroops);
+      stmts.insertEndpoint.run(
+        id,
+        input.seller_id,
+        input.upstream_url,
+        input.upstream_credentials_enc ?? null,
+        input.proxy_slug,
+        input.price_stroops,
+      );
       return stmts.endpointById.get(id) as EndpointRow;
     },
 

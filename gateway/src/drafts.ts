@@ -13,7 +13,10 @@ interface DraftBase {
 
 export interface RegisterEndpointDraft extends DraftBase {
   kind: "register_endpoint";
+  /** Credential-free URL. */
   upstream_url: string;
+  /** Already encrypted at /prepare, so plaintext credentials never sit in the draft store. */
+  upstream_credentials_enc: string | null;
   price_stroops: number;
 }
 

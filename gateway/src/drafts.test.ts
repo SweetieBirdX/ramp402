@@ -6,6 +6,7 @@ const DRAFT: Draft = {
   sellerId: "seller-1",
   txHash: "ab".repeat(32),
   upstream_url: "https://api.example.com/weather",
+  upstream_credentials_enc: null,
   price_stroops: 5_000_000,
 };
 

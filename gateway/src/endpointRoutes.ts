@@ -4,7 +4,8 @@
 // from a counter or a row count here.
 import type { RequestHandler } from "express";
 import { nanoid } from "nanoid";
-import type { DraftStore } from "./drafts.js";
+import type { CredentialCipher } from "./credentials.js";
+import type { DraftStore, RegisterEndpointDraft } from "./drafts.js";
 import { HttpError, validate } from "./errors.js";
 import type { Repo } from "./repo.js";
 import * as schemas from "./schemas.js";
@@ -19,6 +20,8 @@ export interface EndpointRouteDeps {
   repo: Repo;
   drafts: DraftStore;
   ledger: Pick<StellarClient, "contractId" | "buildUnsignedInvoke" | "transactionHash" | "submitSignedXdr">;
+  /** Encrypts upstream credentials with UPSTREAM_CRED_ENCRYPTION_KEY. */
+  credentialCipher: CredentialCipher;
   /** proxy_slug generator; nanoid(8) unless a test overrides it. */
   newSlug?: () => string;
 }
@@ -33,15 +36,10 @@ export function createEndpointRoutes(deps: EndpointRouteDeps) {
     const { upstream_url, price_stroops } = validate(schemas.prepareEndpointRequest, req.body, "body");
     const seller = req.seller!;
 
-    // Credentials must be stored encrypted (checklist §C), and schema.sql has no column for them yet.
-    // Until it does, refuse them rather than store them in clear text or silently drop them.
-    if (splitUpstreamCredentials(upstream_url).credentials) {
-      throw new HttpError(
-        400,
-        "invalid_request",
-        "upstream_url contains credentials (user:password@ or a key/token query parameter), which cannot be stored yet",
-      );
-    }
+    // Credentials are split off and encrypted right here (checklist §C, CONVENTIONS.md §1.4): only the
+    // credential-free URL and the ciphertext go into the draft, the table and any response.
+    const { publicUrl, credentials } = splitUpstreamCredentials(upstream_url);
+    const credentialsEnc = credentials ? deps.credentialCipher.encrypt(credentials) : null;
 
     let unsignedXdr: string;
     try {
@@ -65,7 +63,8 @@ export function createEndpointRoutes(deps: EndpointRouteDeps) {
       kind: "register_endpoint",
       sellerId: seller.sellerId,
       txHash: deps.ledger.transactionHash(unsignedXdr),
-      upstream_url,
+      upstream_url: publicUrl,
+      upstream_credentials_enc: credentialsEnc,
       price_stroops,
     });
     const body: PrepareEndpointResponse = { unsigned_xdr: unsignedXdr, draft_id };
@@ -111,7 +110,7 @@ export function createEndpointRoutes(deps: EndpointRouteDeps) {
       );
     }
 
-    const row = insertWithFreshSlug(endpointId, seller.sellerId, draft.upstream_url, draft.price_stroops, result.txHash);
+    const row = insertWithFreshSlug(endpointId, seller.sellerId, draft, result.txHash);
     const body: SubmitEndpointResponse = {
       endpoint_id: row.id,
       proxy_slug: row.proxy_slug,
@@ -121,15 +120,16 @@ export function createEndpointRoutes(deps: EndpointRouteDeps) {
     res.json(body);
   };
 
-  function insertWithFreshSlug(endpointId: bigint, sellerId: string, upstreamUrl: string, price: number, txHash: string) {
+  function insertWithFreshSlug(endpointId: bigint, sellerId: string, draft: RegisterEndpointDraft, txHash: string) {
     for (let attempt = 1; ; attempt++) {
       try {
         return deps.repo.createEndpoint({
           endpoint_id: endpointId,
           seller_id: sellerId,
-          upstream_url: upstreamUrl,
+          upstream_url: draft.upstream_url,
+          upstream_credentials_enc: draft.upstream_credentials_enc,
           proxy_slug: newSlug(),
-          price_stroops: price,
+          price_stroops: draft.price_stroops,
         });
       } catch (err) {
         const slugTaken = err instanceof Error && /UNIQUE constraint failed: endpoints\.proxy_slug/.test(err.message);

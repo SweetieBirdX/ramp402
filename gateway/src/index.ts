@@ -1,5 +1,6 @@
 import { createApp } from "./app.js";
 import { createAuthMiddleware, privyServicesFromEnv } from "./auth.js";
+import { credentialCipherFromEnv } from "./credentials.js";
 import { getDb } from "./db.js";
 import { createDraftStore } from "./drafts.js";
 import { createFunder, FRIENDBOT_URLS } from "./funding.js";
@@ -16,6 +17,7 @@ const app = createApp({
   authenticate: createAuthMiddleware({ verifyToken: privy.verifyToken, repo }),
   findStellarWallet: privy.findStellarWallet,
   drafts: createDraftStore(),
+  credentialCipher: credentialCipherFromEnv(),
   ledger: stellar,
   readBalance: (address) => stellar.readView<bigint>("get_balance", [scv.address(address)]),
   funder: createFunder({

@@ -1,9 +1,31 @@
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createCredentialCipher } from "./credentials.js";
-import { redactUpstreamUrl, splitUpstreamCredentials } from "./upstream.js";
+import { isSecretParam, redactUpstreamUrl, splitUpstreamCredentials } from "./upstream.js";
 
 const key = () => randomBytes(32).toString("hex");
+
+describe("isSecretParam: whole words, not substrings", () => {
+  it.each([
+    "key", "api_key", "apikey", "apiKey", "X-Api-Key", "access_token", "accessToken", "token", "client_secret",
+    "password", "pass", "sig", "signature", "hmac_sig", "auth", "Authorization", "session_id", "credentials",
+  ])("%s is a credential", (name) => {
+    expect(isSecretParam(name)).toBe(true);
+  });
+
+  it.each(["keyword", "keys_only", "design", "passengers", "passenger_count", "author", "signal", "tokenizer", "city", "q", "monkey"])(
+    "%s is not a credential",
+    (name) => {
+      expect(isSecretParam(name)).toBe(false);
+    },
+  );
+
+  it("leaves innocuous parameters alone in both split and redact", () => {
+    const url = "https://api.test/search?keyword=rain&design=flat&passengers=2&api_key=k";
+    expect(splitUpstreamCredentials(url).publicUrl).toBe("https://api.test/search?keyword=rain&design=flat&passengers=2");
+    expect(redactUpstreamUrl(url)).toBe("https://api.test/search?keyword=rain&design=flat&passengers=2&api_key=REDACTED");
+  });
+});
 
 describe("splitUpstreamCredentials", () => {
   it("removes userinfo and secret query parameters and returns them separately", () => {

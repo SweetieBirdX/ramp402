@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS endpoints (
   id TEXT PRIMARY KEY,
   seller_id TEXT NOT NULL REFERENCES sellers(id),
   upstream_url TEXT NOT NULL,
+  upstream_credentials_enc TEXT,   -- "v1:<iv>:<tag>:<ciphertext>" (AES-256-GCM); NULL if none
   proxy_slug TEXT NOT NULL UNIQUE,
   price_stroops INTEGER NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))

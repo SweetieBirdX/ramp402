@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import { createAuthMiddleware, createPrivyVerifier } from "./auth.js";
 import { openDatabase, type DbHandle } from "./db.js";
+import { createCredentialCipher } from "./credentials.js";
 import { createDraftStore } from "./drafts.js";
 import { createFunder } from "./funding.js";
 import { redactUpstreamUrl } from "./readRoutes.js";
@@ -66,6 +67,7 @@ beforeEach(() => {
       funder: createFunder({ accountExists: async () => true, friendbotUrl: undefined }),
       drafts: createDraftStore(),
       ledger: unusedLedger,
+      credentialCipher: createCredentialCipher("00".repeat(32)),
       readBalance: async (address) => {
         balanceReads.push(address);
         return balances.get(address) ?? 0n;

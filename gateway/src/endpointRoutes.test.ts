@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import { createAuthMiddleware, createPrivyVerifier } from "./auth.js";
 import { openDatabase, type DbHandle } from "./db.js";
+import { createCredentialCipher } from "./credentials.js";
 import { createDraftStore } from "./drafts.js";
 import { createFunder } from "./funding.js";
 import { createRepo, type Repo } from "./repo.js";
@@ -21,6 +23,7 @@ const keys = privyTestKeys();
 const verifyToken = createPrivyVerifier({ appId: TEST_PRIVY_APP_ID, appSecret: "unused-offline", jwtVerificationKey: keys.publicKeyPem });
 
 const U64_MAX = (1n << 64n) - 1n;
+const cipher = createCredentialCipher(randomBytes(32).toString("hex"));
 const DRAFT_TTL_MS = 10 * 60 * 1000;
 
 let dir: string;
@@ -48,6 +51,7 @@ beforeEach(() => {
       readBalance: async () => 0n,
       drafts: createDraftStore({ ttlMs: DRAFT_TTL_MS, now: () => clock.t }),
       ledger: ledger.ledger,
+      credentialCipher: cipher,
     },
     { log: false },
   );
@@ -109,15 +113,10 @@ describe("POST /api/endpoints/prepare", () => {
     expect(res.body.error).toBe("invalid_request");
   });
 
-  it.each([
-    ["userinfo", "https://me:pw@api.test/x"],
-    ["an api_key query parameter", "https://api.test/x?api_key=sk_live_1"],
-    ["a token query parameter", "https://api.test/x?city=ist&token=abc"],
-  ])("refuses a URL carrying credentials (%s) until they can be stored encrypted", async (_label, upstream_url) => {
-    const res = await prepare({ ...VALID, upstream_url });
-    expect(res.status).toBe(400);
-    expect(res.body).toEqual({ error: "invalid_request", message: expect.stringMatching(/credentials/) });
-    expect(ledger.built).toHaveLength(0);
+  it("keeps no plaintext credentials in the draft store (they are encrypted at /prepare)", async () => {
+    const res = await prepare({ ...VALID, upstream_url: "https://me:pw@api.test/x?api_key=sk_live_1" });
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(res.body)).not.toMatch(/sk_live_1|me:pw/);
   });
 
   it("409 when the seller's account is not funded yet", async () => {
@@ -145,6 +144,38 @@ describe("POST /api/endpoints/submit", () => {
     const row = repo.findEndpointById("18446744073709551615");
     expect(row).toMatchObject({ id: "18446744073709551615", proxy_slug: res.body.proxy_slug, price_stroops: 5_000_000 });
     expect(repo.findEndpointBySlug(res.body.proxy_slug)?.id).toBe("18446744073709551615");
+  });
+
+  it("stores seller credentials only encrypted: clean upstream_url, v1 ciphertext, nothing in any response", async () => {
+    const withCreds = "https://me:p%40ss@api.weather.test/v1/forecast?city=istanbul&api_key=sk_live_123&keyword=rain";
+    const prepared = await prepare({ ...VALID, upstream_url: withCreds });
+    ledger.nextResult = () => ({ txHash: "e".repeat(64), returnValue: 7n });
+    const res = await submit({ draft_id: prepared.body.draft_id, signed_xdr: sign(prepared.body.unsigned_xdr) });
+
+    expect(res.status).toBe(200);
+    expect(res.body.upstream_url).toBe("https://api.weather.test/v1/forecast?city=istanbul&keyword=rain");
+    expect(JSON.stringify(res.body)).not.toMatch(/sk_live_123|p%40ss|p@ss|upstream_credentials_enc/);
+
+    const row = repo.findEndpointById("7")!;
+    expect(row.upstream_url).toBe("https://api.weather.test/v1/forecast?city=istanbul&keyword=rain");
+    expect(row.upstream_credentials_enc).toMatch(/^v1:[^:]+:[^:]+:[^:]+$/);
+    expect(row.upstream_credentials_enc).not.toMatch(/sk_live_123|p@ss/);
+    expect(cipher.decrypt(row.upstream_credentials_enc!)).toEqual({
+      username: "me",
+      password: "p@ss",
+      query: { api_key: ["sk_live_123"] },
+    });
+
+    // ...and the dashboard list never carries the ciphertext either.
+    const list = await request(app).get("/api/endpoints").set(auth());
+    expect(JSON.stringify(list.body)).not.toMatch(/upstream_credentials_enc|v1:|sk_live_123/);
+  });
+
+  it("stores NULL credentials for a URL without any", async () => {
+    const prepared = await prepare(VALID);
+    ledger.nextResult = () => ({ txHash: "e".repeat(64), returnValue: 8n });
+    await submit({ draft_id: prepared.body.draft_id, signed_xdr: sign(prepared.body.unsigned_xdr) });
+    expect(repo.findEndpointById("8")).toMatchObject({ upstream_url: VALID.upstream_url, upstream_credentials_enc: null });
   });
 
   it("takes the id from the contract, not from a row count", async () => {

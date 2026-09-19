@@ -22,7 +22,7 @@ function prepareStatements(db: Db) {
     ),
 
     insertEndpoint: db.prepare(
-      "INSERT INTO endpoints (id, seller_id, upstream_url, proxy_slug, price_stroops) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO endpoints (id, seller_id, upstream_url, upstream_credentials_enc, proxy_slug, price_stroops) VALUES (?, ?, ?, ?, ?, ?)",
     ),
     endpointById: db.prepare("SELECT * FROM endpoints WHERE id = ?"),
     endpointBySlug: db.prepare("SELECT * FROM endpoints WHERE proxy_slug = ?"),
