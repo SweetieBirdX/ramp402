@@ -67,6 +67,17 @@ pub struct EndpointRegistered {
     pub price: i128,
 }
 
+/// `FeeSettled { endpoint_id, seller_share, treasury_share }` — CONVENTIONS.md
+/// §1.2. `endpoint_id` is a topic so the gateway can filter by endpoint.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeeSettled {
+    #[topic]
+    pub endpoint_id: u64,
+    pub seller_share: i128,
+    pub treasury_share: i128,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -107,6 +118,14 @@ fn budgets_map(env: &Env) -> Map<(Address, u64), BudgetEntry> {
         .unwrap_or_else(|| Map::new(env))
 }
 
+/// Read the `SellerBalances` map, or an empty one before the first settlement.
+fn seller_balances_map(env: &Env) -> Map<Address, i128> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::SellerBalances)
+        .unwrap_or_else(|| Map::new(env))
+}
+
 /// The stored endpoint, or `EndpointNotFound`.
 fn endpoint_or_panic(env: &Env, endpoint_id: u64) -> EndpointInfo {
     match endpoints_map(env).get(endpoint_id) {
@@ -118,9 +137,8 @@ fn endpoint_or_panic(env: &Env, endpoint_id: u64) -> EndpointInfo {
 #[contract]
 pub struct RampLedger;
 
-// `register_endpoint` and `get_endpoint` are live; the rest are still stubs and
-// the real logic lands in a later prompt. The `allow` goes away with the last
-// `todo!()`.
+// Everything but `withdraw` is live; that one is still a stub and lands in a
+// later prompt. The `allow` goes away with the last `todo!()`.
 #[allow(unused_variables)]
 #[contractimpl]
 impl RampLedger {
@@ -208,7 +226,57 @@ impl RampLedger {
     /// `SellerBalances[seller]`.
     /// event: FeeSettled { endpoint_id, seller_share, treasury_share }
     pub fn settle(env: Env, operator: Address, endpoint_id: u64, amount: i128) {
-        todo!()
+        operator.require_auth();
+
+        let endpoint = endpoint_or_panic(&env, endpoint_id);
+
+        // ROUNDING (CONVENTIONS.md §1.2) — integer arithmetic only, no floats
+        // anywhere near money. The treasury's 1% is an integer division that
+        // truncates, and the seller's share is then derived by SUBTRACTION
+        // rather than by a second division. Subtraction is the part that
+        // matters: it makes `seller_share + treasury_share == amount` an
+        // identity for every input, so settlement can neither create nor lose a
+        // stroop no matter what the remainder is.
+        //
+        // Worked examples:
+        //   amount 5_000_000 -> treasury     50_000, seller 4_950_000 (exact)
+        //   amount       333 -> treasury          3, seller       330
+        //
+        // NOTE for the team: with truncating division the sub-stroop remainder
+        // (0.33 of a stroop in the 333 case) stays with the SELLER, so the
+        // prose in §1.2 — "rounding must never favour the payer or the seller
+        // over the treasury" — does not hold literally for amounts that are not
+        // divisible by 100. The formula is the specified one and the gateway
+        // must mirror it exactly; the sentence is what needs amending. Ceiling
+        // division, `(amount + 99) / 100`, is the one-line alternative if the
+        // team decides the prose wins instead.
+        let treasury_share = amount / 100;
+        let seller_share = amount - treasury_share;
+
+        let mut balances = seller_balances_map(&env);
+        let credited = balances.get(endpoint.seller.clone()).unwrap_or(0) + seller_share;
+        balances.set(endpoint.seller, credited);
+        env.storage()
+            .persistent()
+            .set(&DataKey::SellerBalances, &balances);
+        extend_persistent_ttl(&env, &DataKey::SellerBalances);
+
+        let treasury_total: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TreasuryTotal)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TreasuryTotal, &(treasury_total + treasury_share));
+        extend_persistent_ttl(&env, &DataKey::TreasuryTotal);
+
+        FeeSettled {
+            endpoint_id,
+            seller_share,
+            treasury_share,
+        }
+        .publish(&env);
     }
 
     /// Called by the seller with their own `require_auth()`.
@@ -220,7 +288,7 @@ impl RampLedger {
 
     /// View function (no auth) — backs the gateway's `GET /api/balance`.
     pub fn get_balance(env: Env, seller: Address) -> i128 {
-        todo!()
+        seller_balances_map(&env).get(seller).unwrap_or(0)
     }
 
     /// View function — backs the gateway's price/limit checks.

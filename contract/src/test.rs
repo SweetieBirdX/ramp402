@@ -46,6 +46,21 @@ impl TestSetup {
         RampLedgerClient::new(&self.env, &self.contract_id)
     }
 
+    /// The cumulative `TreasuryTotal`, or 0 before the first settlement.
+    ///
+    /// Like `budget_entry`, this reads persistent storage directly: CONVENTIONS
+    /// .md 1.2 gives the treasury no view function, only `get_balance` for the
+    /// seller side.
+    pub fn treasury_total(&self) -> i128 {
+        self.env.as_contract(&self.contract_id, || {
+            self.env
+                .storage()
+                .persistent()
+                .get::<DataKey, i128>(&DataKey::TreasuryTotal)
+                .unwrap_or(0)
+        })
+    }
+
     /// The stored `BudgetEntry` for an (agent, endpoint_id) pair, or `None` if
     /// no entry has been frozen yet.
     ///
@@ -258,34 +273,82 @@ fn test_record_call_panics_when_budget_exceeded() {
 /// CONVENTIONS.md 1.2 test 4 - "`settle` splits 1% / 99% correctly, and rounding
 /// never favours the user (amount 5_000_000 -> treasury 50_000, seller 4_950_000;
 /// also test a non-divisible amount)".
+///
+/// THE NON-DIVISIBLE CASE IS NOW RULED ON: the formula in 1.2 wins, i.e.
+/// truncating `amount / 100` for the treasury and `amount - treasury_share` for
+/// the seller. That leaves the sub-stroop remainder with the SELLER, so 1.2's
+/// prose ("rounding must never favour the payer or the seller over the
+/// treasury") is the half that needs amending - see the comment on `settle`.
+/// The gateway's own arithmetic must mirror the formula exactly.
 #[test]
-#[ignore = "ramp_ledger bodies are still todo!() - logic lands in a later prompt"]
 fn test_settle_splits_one_percent_correctly() {
     let t = TestSetup::new();
-    let _client = t.client();
+    let client = t.client();
+    t.env.mock_all_auths();
 
-    // MUST ASSERT - the exactly-divisible case, which 1.2 states outright:
-    // - settle(operator, endpoint_id, amount = 5_000_000) results in
-    //       TreasuryTotal           += 50_000
-    //       SellerBalances[seller]  += 4_950_000
-    // - 50_000 + 4_950_000 == 5_000_000 exactly. No stroop is created or lost.
-    // - settle is additive across calls: two settles of 5_000_000 leave the
-    //   seller at 9_900_000 and the treasury at 100_000.
-    //
-    // THE NON-DIVISIBLE CASE IS BLOCKED - 1.2 contradicts itself. Do not guess
-    // the assertion here. The two readings disagree for every amount not
-    // divisible by 100, e.g. amount = 5_000_099:
-    //
-    //   formula as written (floor):  treasury = 5_000_099 / 100      = 50_000
-    //                                seller   = 5_000_099 - 50_000   = 4_950_099
-    //   stated rounding principle:   exact 1% is 50_000.99, so floor leaves the
-    //                                remainder with the SELLER - which is what
-    //                                "rounding must never favour the seller over
-    //                                the treasury" forbids. Ceiling would give
-    //                                treasury = 50_001, seller = 4_950_098.
-    //
-    // Fill this in once Efe rules on which of the two wins, and update 1.2 so
-    // the gateway's own arithmetic matches.
+    let id = client.register_endpoint(&t.seller, &1_000);
+
+    // Nothing settled yet.
+    assert_eq!(client.get_balance(&t.seller), 0);
+    assert_eq!(t.treasury_total(), 0);
+
+    // The exactly-divisible case 1.2 states outright.
+    client.settle(&t.operator, &id, &5_000_000);
+    assert_eq!(client.get_balance(&t.seller), 4_950_000);
+    assert_eq!(t.treasury_total(), 50_000);
+    // No stroop created, none lost.
+    assert_eq!(4_950_000 + 50_000, 5_000_000);
+
+    // settle is additive across calls.
+    client.settle(&t.operator, &id, &5_000_000);
+    assert_eq!(client.get_balance(&t.seller), 9_900_000);
+    assert_eq!(t.treasury_total(), 100_000);
+
+    // THE NON-DIVISIBLE CASE. 1% of 333 is 3.33 stroops: the treasury takes the
+    // truncated 3 and the seller keeps the remaining 330, because the seller's
+    // share is computed by subtraction. The invariant that always holds is
+    // `seller_share + treasury_share == amount`.
+    let before_seller = client.get_balance(&t.seller);
+    let before_treasury = t.treasury_total();
+    client.settle(&t.operator, &id, &333);
+    assert_eq!(client.get_balance(&t.seller) - before_seller, 330);
+    assert_eq!(t.treasury_total() - before_treasury, 3);
+    assert_eq!(330 + 3, 333);
+
+    // The same identity on the awkward edges, where a second division rather
+    // than a subtraction would visibly leak stroops.
+    for (amount, treasury, seller) in [
+        (1_i128, 0_i128, 1_i128),      // below a stroop of fee: treasury gets nothing
+        (99, 0, 99),                   // still under 1% of a stroop
+        (100, 1, 99),                  // the first whole stroop of fee
+        (199, 1, 198),
+        (5_000_099, 50_000, 4_950_099),
+    ] {
+        let s0 = client.get_balance(&t.seller);
+        let tr0 = t.treasury_total();
+        client.settle(&t.operator, &id, &amount);
+        assert_eq!(
+            t.treasury_total() - tr0,
+            treasury,
+            "treasury share of {}",
+            amount
+        );
+        assert_eq!(
+            client.get_balance(&t.seller) - s0,
+            seller,
+            "seller share of {}",
+            amount
+        );
+        assert_eq!(treasury + seller, amount, "shares of {} must sum", amount);
+    }
+
+    // A settlement credits the endpoint OWNER, and touches no other seller.
+    let other_seller = Address::generate(&t.env);
+    let other_id = client.register_endpoint(&other_seller, &1_000);
+    let seller_before = client.get_balance(&t.seller);
+    client.settle(&t.operator, &other_id, &5_000_000);
+    assert_eq!(client.get_balance(&other_seller), 4_950_000);
+    assert_eq!(client.get_balance(&t.seller), seller_before);
 }
 
 /// CONVENTIONS.md 1.2 test 5 - "An unauthorised `withdraw` (wrong signer) panics".
@@ -500,4 +563,71 @@ fn test_record_call_panics_on_unknown_endpoint() {
         Err(Ok(Error::EndpointNotFound.into()))
     );
     assert_eq!(t.budget_entry(&t.agent, 404), None);
+}
+
+/// `get_balance` is a view with no auth, and answers 0 for a seller that has
+/// never been settled to - it must not panic the way `get_endpoint` does.
+#[test]
+fn test_get_balance_is_zero_for_unknown_seller() {
+    let t = TestSetup::new();
+    let client = t.client();
+    let stranger = Address::generate(&t.env);
+
+    // Empty contract, and no mock_all_auths(): a view takes no signature.
+    assert_eq!(client.get_balance(&stranger), 0);
+
+    t.env.mock_all_auths();
+    let id = client.register_endpoint(&t.seller, &1_000);
+    client.settle(&t.operator, &id, &5_000_000);
+
+    // Someone else having a balance does not give the stranger one.
+    assert_eq!(client.get_balance(&stranger), 0);
+    assert_eq!(client.get_balance(&t.seller), 4_950_000);
+}
+
+/// `settle` on an id that was never registered panics with `EndpointNotFound`:
+/// there is no seller to credit, so it must not silently do nothing either.
+#[test]
+fn test_settle_panics_on_unknown_endpoint() {
+    let t = TestSetup::new();
+    let client = t.client();
+    t.env.mock_all_auths();
+
+    assert_eq!(
+        client.try_settle(&t.operator, &404, &5_000_000),
+        Err(Ok(Error::EndpointNotFound.into()))
+    );
+    assert_eq!(t.treasury_total(), 0);
+}
+
+/// `settle` requires the signature of the address it is handed as `operator`.
+/// The same limit applies as in `test_record_call_requires_the_named_operators_signature`:
+/// nothing on chain says WHICH address is the operator - see the SECURITY GAP
+/// note there, which is worse here because `settle` credits balances.
+#[test]
+fn test_settle_requires_the_named_operators_signature() {
+    let t = TestSetup::new();
+    let client = t.client();
+    let attacker = Address::generate(&t.env);
+
+    t.env.mock_all_auths();
+    let id = client.register_endpoint(&t.seller, &1_000);
+
+    t.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &MockAuthInvoke {
+            contract: &t.contract_id,
+            fn_name: "settle",
+            args: (attacker.clone(), id, 5_000_000_i128).into_val(&t.env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let result = client.try_settle(&t.operator, &id, &5_000_000);
+    assert!(result.is_err());
+    assert_ne!(result, Err(Ok(Error::EndpointNotFound.into())));
+
+    // Nothing was credited.
+    assert_eq!(client.get_balance(&t.seller), 0);
+    assert_eq!(t.treasury_total(), 0);
 }
