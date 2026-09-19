@@ -37,3 +37,6 @@ Thumbs.db
 *.log
 coverage/
 .turbo/
+
+# soroban test snapshots — rewritten by every `cargo test` run, pure churn
+contract/test_snapshots/

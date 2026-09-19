@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use crate::{RampLedger, RampLedgerClient};
+use crate::{EndpointInfo, Error, RampLedger, RampLedgerClient};
 use soroban_sdk::{testutils::Address as _, Address, Env};
 
 /// Reusable fixture for the `ramp_ledger` tests.
@@ -52,21 +52,52 @@ impl TestSetup {
 /// CONVENTIONS.md 1.2 test 1 - "Calling `register_endpoint` twice returns two
 /// different ids (counter increments correctly)".
 #[test]
-#[ignore = "ramp_ledger bodies are still todo!() - logic lands in a later prompt"]
 fn test_register_endpoint_increments_id() {
     let t = TestSetup::new();
-    let _client = t.client();
+    let client = t.client();
 
-    // MUST ASSERT:
-    // - env.mock_all_auths(), since register_endpoint calls seller.require_auth().
-    // - Two successive register_endpoint(seller, price) calls return DIFFERENT ids.
-    // - The second id == the first id + 1 (the NextEndpointId counter increments
-    //   by exactly one; it does not skip or reuse).
-    // - The first id is 1. CONVENTIONS.md 1.2 does not state the starting value
-    //   outright, but 1.1 says SQLite stores the decimal string form as
-    //   ("1", "2", ...), so the counter is 1-based. CONFIRM before relying on it.
-    // - Registering from a DIFFERENT seller still advances the same global
-    //   counter - the counter is per-contract, not per-seller.
+    // register_endpoint calls seller.require_auth(); this test is about the
+    // counter, not about authorisation (test 5 covers that).
+    t.env.mock_all_auths();
+
+    let first = client.register_endpoint(&t.seller, &1_000);
+    let second = client.register_endpoint(&t.seller, &2_500);
+
+    // The counter is 1-based: CONVENTIONS.md 1.1 spells the SQLite string forms
+    // as ("1", "2", ...).
+    assert_eq!(first, 1);
+    assert_ne!(first, second);
+    assert_eq!(second, first + 1);
+
+    // A DIFFERENT seller advances the SAME global counter - ids are unique
+    // per contract, not per seller.
+    let other_seller = Address::generate(&t.env);
+    let third = client.register_endpoint(&other_seller, &7);
+    assert_eq!(third, second + 1);
+
+    // Each id maps to its own stored EndpointInfo - the ids are not merely
+    // distinct numbers, they address distinct rows.
+    assert_eq!(
+        client.get_endpoint(&first),
+        EndpointInfo {
+            seller: t.seller.clone(),
+            price: 1_000,
+        }
+    );
+    assert_eq!(
+        client.get_endpoint(&second),
+        EndpointInfo {
+            seller: t.seller.clone(),
+            price: 2_500,
+        }
+    );
+    assert_eq!(
+        client.get_endpoint(&third),
+        EndpointInfo {
+            seller: other_seller,
+            price: 7,
+        }
+    );
 }
 
 /// CONVENTIONS.md 1.2 test 2 - "`record_call` freezes `budget` on the first call;
@@ -189,4 +220,60 @@ fn test_withdraw_zeroes_balance() {
     // - A SECOND withdraw returns 0 and does not panic, and does not go negative.
     // - The withdraw does NOT touch TreasuryTotal, and does not touch any OTHER
     //   seller's balance.
+}
+
+// ---------------------------------------------------------------------------
+// Additional tests beyond the six required by CONVENTIONS.md 1.2.
+// ---------------------------------------------------------------------------
+
+/// `get_endpoint` on an id that was never registered panics with
+/// `EndpointNotFound`. Asserted on the ERROR CODE via the fallible client, not
+/// with #[should_panic] - that would pass on any panic at all.
+///
+/// NOTE for the remaining tests: because CONVENTIONS.md 1.2 fixes the return
+/// types as plain values (not `Result<_, Error>`), the generated `try_*` client
+/// hands back a `soroban_sdk::Error`, so the enum variant needs `.into()` -
+/// `Err(Ok(Error::EndpointNotFound))` alone does not typecheck.
+#[test]
+fn test_get_endpoint_panics_on_unknown_id() {
+    let t = TestSetup::new();
+    let client = t.client();
+
+    // Empty contract: nothing has ever been registered.
+    assert_eq!(
+        client.try_get_endpoint(&1),
+        Err(Ok(Error::EndpointNotFound.into()))
+    );
+
+    // ...and still after a registration, for an id next to the live one, so the
+    // failure is about the LOOKUP and not about empty storage.
+    t.env.mock_all_auths();
+    let id = client.register_endpoint(&t.seller, &1_000);
+    assert_eq!(client.get_endpoint(&id).price, 1_000);
+    assert_eq!(
+        client.try_get_endpoint(&(id + 1)),
+        Err(Ok(Error::EndpointNotFound.into()))
+    );
+}
+
+/// `register_endpoint` rejects a non-positive price: a free or negative-priced
+/// endpoint has no meaning in a pay-per-call gateway, and a zero price would
+/// let an agent burn an unlimited number of calls against a frozen budget.
+#[test]
+fn test_register_endpoint_rejects_non_positive_price() {
+    let t = TestSetup::new();
+    let client = t.client();
+    t.env.mock_all_auths();
+
+    assert_eq!(
+        client.try_register_endpoint(&t.seller, &0),
+        Err(Ok(Error::InvalidPrice.into()))
+    );
+    assert_eq!(
+        client.try_register_endpoint(&t.seller, &-1),
+        Err(Ok(Error::InvalidPrice.into()))
+    );
+
+    // A rejected registration does not consume an id.
+    assert_eq!(client.register_endpoint(&t.seller, &1), 1);
 }
