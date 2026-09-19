@@ -29,7 +29,9 @@ Thumbs.db
 
 # Rust
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock IS committed for contract/ — the deployed wasm must be reproducible,
+# and it pins ed25519-dalek 2.2.0 around a soroban-env-host 23.0.1 resolution break
+# that otherwise breaks `cargo test` on a fresh clone.
 
 # misc
 *.log
