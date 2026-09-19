@@ -4,6 +4,23 @@ import { useEffect, useState, useMemo } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useCreateWallet } from "@privy-io/react-auth/extended-chains";
 
+let globalAccessTokenGetter: (() => Promise<string | null>) | null = null;
+
+export function setGlobalAccessTokenGetter(getter: (() => Promise<string | null>) | null): void {
+  globalAccessTokenGetter = getter;
+}
+
+export async function getAccessToken(): Promise<string | null> {
+  if (globalAccessTokenGetter) {
+    try {
+      return await globalAccessTokenGetter();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 export interface AuthState {
   ready: boolean;
   authenticated: boolean;
@@ -17,10 +34,14 @@ export interface AuthState {
 }
 
 export function useAuth(): AuthState {
-  const { ready, authenticated, user, getAccessToken, login, logout } = usePrivy();
+  const { ready, authenticated, user, getAccessToken: privyGetAccessToken, login, logout } = usePrivy();
   const { createWallet } = useCreateWallet();
   const [createdAddress, setCreatedAddress] = useState<string | null>(null);
   const [isCreatingWallet, setIsCreatingWallet] = useState(false);
+
+  useEffect(() => {
+    setGlobalAccessTokenGetter(privyGetAccessToken);
+  }, [privyGetAccessToken]);
 
   // Extract user email if present in linkedAccounts or user object
   const email = useMemo(() => {
@@ -74,7 +95,7 @@ export function useAuth(): AuthState {
     ready,
     authenticated,
     stellarAddress,
-    getAccessToken,
+    getAccessToken: privyGetAccessToken,
     user,
     email,
     login,
