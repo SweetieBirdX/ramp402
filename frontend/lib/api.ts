@@ -277,9 +277,21 @@ export async function callProxy(
   const baseUrl = getGatewayUrl();
   const url = `${baseUrl}/proxy/${encodeURIComponent(proxy_slug)}`;
 
-  return fetch(url, {
-    method: "GET",
-    headers,
-    signal: options?.signal,
-  });
+  try {
+    return await fetch(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+  } catch (err: unknown) {
+    if (typeof window !== "undefined") {
+      const fallbackUrl = `/api/proxy/${encodeURIComponent(proxy_slug)}`;
+      return fetch(fallbackUrl, {
+        method: "GET",
+        headers,
+        signal: options?.signal,
+      });
+    }
+    throw err;
+  }
 }
