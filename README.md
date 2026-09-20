@@ -55,7 +55,7 @@ Before the setup script can run, `gateway/.env` needs two values:
 | Variable | Where it comes from |
 | --- | --- |
 | `OPERATOR_SECRET_KEY` | Ask the team. It is the key baked into the deployed contract and no script generates it, deliberately: a fresh operator would produce a system that looks configured and fails on every paid call with `NotOperator`. |
-| `ANCHOR_HOME_DOMAIN` | `testanchor.stellar.org` for the testnet demo. There is no default: the USDC issuer is read from this anchor's `stellar.toml`, never hardcoded. |
+| `ANCHOR_HOME_DOMAIN` | `tr-mock-anchor.fly.dev` for the demo — it is the anchor that quotes TRY. There is no default: the USDC issuer is read from this anchor's `stellar.toml`, never hardcoded. `testanchor.stellar.org` also works but sells only USD and CAD, so the TRY off-ramp cannot be demonstrated against it. |
 
 Add `PRIVY_APP_ID` and `PRIVY_APP_SECRET` from the Privy dashboard as well — the gateway will not
 start without them. Everything else is printed by the next step.
@@ -288,7 +288,7 @@ no login.
 ### Tests
 
 ```bash
-npm test                # 277 tests, offline, no network and never ramp402.db
+npm test                # 286 tests, offline, no network and never ramp402.db
 npm run test:integration  # the deployed contract, the anchor and the facilitator, for real
 ```
 
