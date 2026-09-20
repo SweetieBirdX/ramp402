@@ -15,6 +15,16 @@ import {
 } from "@/lib/agent";
 import { displayToStroops, stroopsToDisplay } from "@/lib/format";
 
+/**
+ * The demo endpoint's price, 0.50 USDC, matching `DEMO_PRICE_STROOPS` in scripts/lib/demo.ts.
+ *
+ * Used only for the console's own spent/remaining display before a call returns; the price the
+ * agent actually pays comes from the 402's payment requirements, and the settled figure from
+ * `CallResult.priceStroops`. If the demo endpoint is registered at another price via
+ * DEMO_PRICE_STROOPS, only this progress bar is affected, never what is paid.
+ */
+const DEMO_PRICE_STROOPS_PER_CALL = 5_000_000;
+
 export default function AgentConsolePage() {
   // Agent Account & Balances
   const [agent, setAgent] = useState<AgentAccount | null>(() => {
@@ -35,7 +45,9 @@ export default function AgentConsolePage() {
 
   // Configuration Inputs
   const [proxySlug, setProxySlug] = useState("demo");
-  const [budgetUsdc, setBudgetUsdc] = useState("0.30"); // 3 calls at 0.10 USDC each
+  // 1.75 buys three calls at 0.50 and refuses the fourth at 2.00. Sized so the seller's net
+  // (1.485 after the 1% fee) clears the anchor's 1 USDC withdrawal floor and the demo can finish.
+  const [budgetUsdc, setBudgetUsdc] = useState("1.75");
   const [omitBudgetHeader, setOmitBudgetHeader] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
@@ -146,7 +158,7 @@ export default function AgentConsolePage() {
 
   // Compute budget figures
   const budgetStroops = displayToStroops(budgetUsdc || "0");
-  const priceStroopsPerCall = 1_000_000; // 0.10 USDC = 1,000,000 stroops
+  const priceStroopsPerCall = DEMO_PRICE_STROOPS_PER_CALL;
   const successfulCalls = callHistory.filter((c) => c.status === 200).length;
   const spentStroops = successfulCalls * priceStroopsPerCall;
   const remainingStroops = Math.max(0, budgetStroops - spentStroops);
@@ -800,7 +812,7 @@ export default function AgentConsolePage() {
                       HTTP 200 OK · Micropayment Settled
                     </span>
                     <span className="text-xs text-emerald-300 font-semibold font-mono">
-                      Spent: {stroopsToDisplay(lastResult.priceStroops || 1_000_000)} USDC
+                      Spent: {stroopsToDisplay(lastResult.priceStroops || DEMO_PRICE_STROOPS_PER_CALL)} USDC
                     </span>
                   </div>
 

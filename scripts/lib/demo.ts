@@ -24,8 +24,15 @@ export const REPO_ROOT = resolve(HERE, "..", "..");
 export const DEMO_UPSTREAM_URL =
   process.env.DEMO_UPSTREAM_URL?.trim() || "https://api.frankfurter.dev/v1/latest?base=USD&symbols=TRY";
 
-/** 0.1 USDC a call. Small enough that a demo budget buys several. */
-export const DEMO_PRICE_STROOPS = BigInt(process.env.DEMO_PRICE_STROOPS?.trim() || "1000000");
+/**
+ * 0.50 USDC a call — the documented demo economics.
+ *
+ * The figure is chosen so the demo can reach its final step. Three calls gross 1.50, of which the
+ * seller nets 1.485 after the 1% fee, clearing the anchor's 1 USDC withdrawal floor (§1.5). At the
+ * old 0.10 a call three calls netted 0.297 and the withdrawal was refused as too small, so the
+ * off-ramp could never be shown.
+ */
+export const DEMO_PRICE_STROOPS = BigInt(process.env.DEMO_PRICE_STROOPS?.trim() || "5000000");
 
 /** Demo rows carry fixed ids so a re-run replaces them instead of piling up. */
 export const DEMO_SELLER_ID = "demo-seller";

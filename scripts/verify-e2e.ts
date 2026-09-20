@@ -29,6 +29,13 @@ const PRIVY_ACCESS_TOKEN = process.env.PRIVY_ACCESS_TOKEN?.trim();
 /** Three calls' worth, so the fourth is refused — the demo's budget moment. */
 const CALLS_WITHIN_BUDGET = 3;
 
+/**
+ * The documented agent budget, 1.75 USDC. At the demo price of 0.50 it buys exactly three calls
+ * and refuses the fourth at 2.00. Stated rather than derived from the price, because it is one of
+ * the two figures the demo economics fix; the guard below catches the two going out of step.
+ */
+const AGENT_BUDGET_STROOPS = 17_500_000n;
+
 interface DemoEndpointRow {
   id: string;
   proxy_slug: string;
@@ -65,7 +72,20 @@ async function main(): Promise<void> {
 
   const agent = newAgent();
   const price = BigInt(endpoint.price_stroops);
-  const budget = price * BigInt(CALLS_WITHIN_BUDGET);
+  const budget = AGENT_BUDGET_STROOPS;
+
+  // Fail loudly rather than quietly testing something else. If the endpoint's price and the
+  // documented budget disagree, the run would exercise a different number of calls than the demo
+  // and its "the fourth is refused" assertion would mean nothing.
+  const callsAffordable = Number(budget / price);
+  if (callsAffordable !== CALLS_WITHIN_BUDGET) {
+    console.error(
+      `[FAIL] a ${usdc(budget)} budget buys ${callsAffordable} calls at ${usdc(price)}, not ` +
+        `${CALLS_WITHIN_BUDGET}. The demo economics and the registered endpoint price are out of ` +
+        `step — re-run scripts/reset-demo.ts, or reconcile DEMO_PRICE_STROOPS with AGENT_BUDGET_STROOPS.`,
+    );
+    process.exit(1);
+  }
 
   console.log("ramp402 · verify-e2e");
   console.log(`  gateway    ${GATEWAY_URL}`);

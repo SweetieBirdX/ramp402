@@ -42,8 +42,8 @@ import {
   usdc,
 } from "./lib/chain.js";
 
-/** Price of one call, in stroops. 1 USDC = 10_000_000 stroops, so this is 0.1 USDC. */
-const PRICE = 1_000_000n;
+/** Price of one call: 0.50 USDC, the documented demo price (scripts/lib/demo.ts). */
+const PRICE = 5_000_000n;
 /** Budget for exactly three calls — the fourth must be refused. */
 const BUDGET = PRICE * 3n;
 /** What the three successful calls earned, settled in one go. */
