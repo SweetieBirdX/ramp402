@@ -1,401 +1,439 @@
 # Ramp402
 
-A pay-per-call x402 payment gateway for APIs, with a Turkish Lira off-ramp through a Stellar anchor.
+**Pay-per-call payments for APIs, with a local-currency exit.**
 
-**Read [docs/CONVENTIONS.md](docs/CONVENTIONS.md) before writing any code.**
+Ramp402 puts an x402 payment gate in front of any existing HTTP API: autonomous agents pay per
+request in USDC on Stellar, and the developer who owns the API withdraws the accumulated revenue to
+Turkish lira through a Stellar anchor. The selling side and the getting-paid side are the same
+product, not two.
 
-## Repository layout
+- Live demo: https://ramp402.vercel.app/
+- Gateway API: https://ramp402-production.up.railway.app/
+- Contract (Soroban, testnet): `CC73BWETYN2PWAO6YPDLX4H75XUUMH4HDQQJMJYQPY2SW3PE2TEP4CVJ`
+- Track: **Genesis**
 
-| Folder | What it is |
-| --- | --- |
-| `contract/` | Soroban smart contract `ramp_ledger` (Rust). A ledger only — it records who spent what and who is owed what, and never holds or transfers tokens. |
-| `gateway/` | Node/TypeScript. The x402 proxy, the REST API, the SQLite cache, and the SEP-10/38/12/6 anchor off-ramp. |
-| `frontend/` | Next.js. Seller dashboard and the agent console used to drive the live demo. |
-| `scripts/` | Setup, demo reset, and verification scripts. |
-| `docs/` | `CONVENTIONS.md` (the shared contract) and `TECHNICAL.md`. |
+---
 
-## Setup
+## The problem
 
-From a fresh clone to a running system. Everything below is scripted — the hackathon sandbox can be
-reset at any time, and rebuilding by hand under time pressure is how a demo gets lost.
+A developer in Türkiye can sell their API or data abroad. What they cannot do is get the money,
+in lira, in their own bank account, quickly and cheaply. Today that path runs through a collection
+provider: a percentage fee, an FX spread they do not control, and days of waiting.
 
-### 1. Prerequisites
+At the same time, the buying side has its own friction. To call a paid endpoint once, a caller has
+to register, get an API key, and set up a subscription — for a single request. That is a bad fit for
+a script, for a cron job, and it is an impossible fit for an autonomous agent that discovers a
+service at runtime.
 
-| Tool | Version | Why |
+x402 removes the friction on the buying side. An anchor removes it on the selling side. Ramp402 is
+the product that connects the two:
+
+```
+agent pays per call (USDC, x402)  →  Ramp402  →  developer withdraws (TRY, SEP-6 anchor)
+```
+
+**Who pays us, and who benefits.** The 1% fee is paid by the *seller*, not the agent — and the
+seller already pays for this exact service today, more expensively and more slowly. We are not
+asking a new stakeholder to open their wallet; we are competing for a budget line that already
+exists. The beneficiary is any developer, indie API author or data publisher who sells to
+international callers and needs the proceeds locally.
+
+**Target user:** developers and small teams who already have a working HTTP API and no way to
+monetise it per request. Onboarding is an email login (Privy) and a form; no wallet, no key
+management, no SDK to install, no change to their existing code.
+
+**Global in, local out.** The paying side is global from day one — any agent, anywhere, with USDC.
+Only the exit leg is Turkish, and that leg is discovered from the anchor's `stellar.toml`, never
+hardcoded. A second country is a second home domain, not a second codebase.
+
+---
+
+## How the hackathon requirements are met
+
+| Requirement | Our implementation | Why it is load-bearing |
 | --- | --- | --- |
-| Node | 20 or newer | gateway, frontend and the scripts |
-| Rust | installed via rustup | `contract/rust-toolchain.toml` pins 1.90.0 and rustup fetches it |
-| Stellar CLI | 25.2.0 | building and deploying the contract |
+| **1. Integration** (SCF list) | **Privy** — email login, embedded Stellar wallet, seller signs `register_endpoint` and `withdraw` | Without it there is no onboarding and no seller signature; the whole seller side runs on it |
+| **2. Anchor / Local payments** | **tr-mock-anchor** (SEP-1 / 10 / 12 / 38 / 6) — USDC → TRY off-ramp, live; TRY → USDC on-ramp exercised | It is the only exit for the revenue the gateway collects |
+| **3. Core feature** | **x402 pay-per-call gateway** (x402 v2 on Stellar) | It is the product; everything else exists to serve it |
+| Extra | **Soroban contract `ramp_ledger`**, deployed to testnet, 6 unit tests | Budget enforcement, revenue accounting and withdrawal authority live on chain |
 
-Rust and the Stellar CLI are only needed to work on the contract. Running the system against the
-already-deployed contract needs Node alone.
+The anchor is [tr-mock-anchor](https://github.com/kaankacar/tr-mock-anchor) by **Kaan Kaçar**; we
+integrate it, we did not build it.
 
-### 2. Install
+---
 
-```bash
-npm install                 # repo root — the scripts in scripts/
-cd gateway   && npm install && cd ..
-cd frontend  && npm install && cd ..
-```
+## What the product does, end to end
 
-### 3. Environment
+1. **Seller onboards.** Email login via Privy → an embedded Stellar wallet is created → the gateway
+   funds that address via Friendbot so it exists as a ledger account and can sign.
+2. **Seller registers an endpoint.** They paste their upstream URL and a per-call price. The gateway
+   builds an unsigned Soroban transaction, Privy signs it, `register_endpoint` returns an on-chain
+   `endpoint_id`, and the gateway hands back a protected proxy URL.
+3. **An agent calls the proxy URL.** It gets `402 Payment Required` with the payment terms, retries
+   with a signed payment, and receives `200 OK` with the upstream response.
+4. **The agent runs out of budget.** Its budget was frozen on the first call for that
+   (agent, endpoint) pair. The call that would exceed it is rejected *by the contract*, and the
+   gateway returns `403` with the rejected transaction hash.
+5. **Seller withdraws to lira.** One button: contract `withdraw` → SEP-10 auth → SEP-38 quote →
+   SEP-6 withdraw → classic payment with `memo_type: id` → the anchor pays out and the transaction
+   walks to `completed` with an `external_transaction_id`.
 
-```bash
-cp gateway/.env.example gateway/.env                  # the gateway — and the scripts read it too
-cp frontend/.env.local.example frontend/.env.local    # the frontend
-```
-
-`gateway/.env` is the one file that holds keys. The scripts in `scripts/` read it as well, so a
-key you paste there is reused on every re-run instead of being minted again. A root `.env`
-(`cp .env.example .env`) is optional: set a value there only to override `gateway/.env` for the
-scripts.
-
-Before the setup script can run, `gateway/.env` needs two values:
-
-| Variable | Where it comes from |
-| --- | --- |
-| `OPERATOR_SECRET_KEY` | Ask the team. It is the key baked into the deployed contract and no script generates it, deliberately: a fresh operator would produce a system that looks configured and fails on every paid call with `NotOperator`. |
-| `ANCHOR_HOME_DOMAIN` | `tr-mock-anchor.fly.dev` for the demo — it is the anchor that quotes TRY. There is no default: the USDC issuer is read from this anchor's `stellar.toml`, never hardcoded. `testanchor.stellar.org` also works but sells only USD and CAD, so the TRY off-ramp cannot be demonstrated against it. |
-
-Add `PRIVY_APP_ID` and `PRIVY_APP_SECRET` from the Privy dashboard as well — the gateway will not
-start without them. Everything else is printed by the next step.
-
-### 4. Create the accounts and a demo endpoint
-
-```bash
-npx tsx scripts/setup.ts
-```
-
-It funds the operator, creates and funds the platform pool, reads the USDC issuer from the anchor's
-`stellar.toml`, adds the pool's USDC trustline, creates and funds the treasury and a demo seller,
-registers a demo endpoint against the deployed contract, and caches it in SQLite so `/proxy/:slug`
-works the moment the gateway starts. It prints a `[PASS]`/`[FAIL]` line per step and a final tally.
-
-It ends with a complete block of `KEY=value` lines — network settings, the new pool key, the
-treasury address, a freshly generated `UPSTREAM_CRED_ENCRYPTION_KEY`, and the demo fixtures.
-**Paste all of it into `gateway/.env`.** Secrets are printed to the terminal once and never written
-to a file; a line that says `unchanged` means the value is already in your environment.
-
-It is **idempotent**: accounts whose keys are already in your environment are reused, funding and
-the trustline are no-ops once done, and the demo endpoint is reused while it is still cached and on
-chain. Re-running it after pasting prints `already funded` / `already present` /
-`already registered` for every step.
-
-### 5. Run
-
-Two terminals:
-
-```bash
-cd gateway  && npm run dev      # http://localhost:3001
-cd frontend && npm run dev      # http://localhost:3000
-```
-
-Set `NEXT_PUBLIC_GATEWAY_URL=http://localhost:3001` and `NEXT_PUBLIC_PRIVY_APP_ID` (the same value
-as `PRIVY_APP_ID`) in `frontend/.env.local` first.
-
-Check it:
-
-```bash
-curl http://localhost:3001/health                                      # {"ok":true}
-curl -i -H "X-Agent-Budget: 5000000" http://localhost:3001/proxy/<DEMO_PROXY_SLUG>
-# → 402 Payment Required with a PAYMENT-REQUIRED header. That is the product working:
-#   the agent has not paid yet.
-```
-
-### 6. Between demo rehearsals
-
-**Stop the gateway first**, then:
-
-```bash
-npx tsx scripts/reset-demo.ts
-```
-
-Deletes the SQLite cache, recreates it from `gateway/schema.sql`, checks that it really is empty,
-and registers a fresh demo endpoint under the same `DEMO_PROXY_SLUG`, so the dashboard starts
-empty and the demo URL does not change. It does **not** redeploy the contract, change any key, or
-undo anything on chain — the ledger is permanent and the cache is rebuildable. With the gateway
-still running the database file is locked, and the script fails with "stop the gateway first"
-rather than resetting half of it.
-
-### 7. Check it works
-
-```bash
-cd contract && cargo test                        # contract unit tests, offline
-npx tsx scripts/smoke-contract.ts                # the deployed contract, on testnet
-cd gateway && npm test                           # gateway suite
-```
-
-> **What has actually been walked through:** steps 2–6 were followed literally in a fresh clone on
-> 2026-09-19 (Windows, Node 24): install, the two values in `gateway/.env`, setup (8/8 PASS),
-> pasting its output, a second setup run (every step reused, no new endpoint), gateway (`/health`
-> 200, demo slug 402 with `PAYMENT-REQUIRED`), frontend (`/` and `/dashboard` 200), and
-> `reset-demo` with the gateway stopped (4/4 PASS, cache empty) and running (refused). A paid call
-> and the Privy login were not part of this walk-through.
-
-## Contract
-
-`ramp_ledger` is deployed on testnet and verified on chain. It is a **ledger only** — it records
-who spent what and who is owed what, and never holds or transfers a token. The USDC itself moves
-off chain from the platform pool account. That is a deliberate architectural decision: the contract
-custodies nothing, so there is nothing in it to steal.
+Demo economics (fixed, and chosen so the payout clears the anchor's 1 USDC floor):
 
 | | |
 | --- | --- |
-| Network | testnet (`Test SDF Network ; September 2015`) |
-| Contract ID | `CC73BWETYN2PWAO6YPDLX4H75XUUMH4HDQQJMJYQPY2SW3PE2TEP4CVJ` |
-| Operator (public) | `GBTTFVGWRRZUGDOVCZZYHDJTN5733JT5NCDIQK42Y2PPFUTYYPURQPW6` |
-| Deployer (public) | `GCYLZISOHDHY3E2NCZU2F72Y6SJAT5CN3ZUVSMHPYA76H7SUDP264335` |
-| Wasm hash | `6fd92d7348e545ea4c3ba68c10410368f5fd97faa06810d6057bed8ada7caf00` |
-| Build target | `wasm32v1-none`, 15,691 bytes optimised |
-| soroban-sdk | 23.5.3 |
-| Rust | 1.90.0, pinned by `contract/rust-toolchain.toml` |
-| Stellar CLI | 25.2.0 |
+| Price per call | 0.50 USDC (`5000000` stroops) |
+| Agent budget | 1.75 USDC — the 4th call is rejected on chain |
+| 3 successful calls | 1.50 USDC gross |
+| Platform fee (1%) | 0.015 USDC |
+| **Seller net** | **1.485 USDC** → withdrawn to TRY |
 
-### The six functions
+The FX rate is never hardcoded; it is read live from the anchor's SEP-38 quote.
 
-All amounts are integer **stroops** (1 USDC = 10,000,000 stroops). No decimals ever reach the
-chain.
-
-| Function | Who signs | What it does |
-| --- | --- | --- |
-| `register_endpoint(seller, upstream_price) -> u64` | the seller | Records a paid API endpoint and returns the `endpoint_id` the contract assigns. Nobody else invents that id. |
-| `record_call(operator, agent, endpoint_id, budget)` | the operator | Charges one call against an agent's budget. The budget is frozen by the pair's **first** call and ignored afterwards, so a later, larger budget cannot raise the ceiling. The agent never signs. |
-| `settle(operator, endpoint_id, amount)` | the operator | Splits a settled amount 1% to the treasury, 99% to the endpoint's seller. Integer arithmetic; the two shares always sum back to `amount`. |
-| `withdraw(seller) -> i128` | the seller | Zeroes that seller's balance and returns it, so the gateway can pay it out off chain. Returns 0 if there is nothing owed — it does not fail. |
-| `get_balance(seller) -> i128` | nobody (view) | The seller's withdrawable balance, or 0. The chain is the source of truth for balances, not SQLite. |
-| `get_endpoint(endpoint_id) -> EndpointInfo` | nobody (view) | The endpoint's seller and per-call price. Panics `EndpointNotFound` for an unknown id. |
-
-Three more functions manage the operator identity itself:
-
-| Function | Who signs | What it does |
-| --- | --- | --- |
-| `__constructor(operator)` | the deployer | Runs once, inside the deployment. Fixes which address may call `record_call` and `settle`. Mandatory — no deployment exists without one. |
-| `set_operator(new_operator)` | the current operator | Hands the role to a different keypair without redeploying. |
-| `get_operator() -> Address` | nobody (view) | Reads the stored operator back. Check this before a demo. |
-
-Contract errors: `1 SpendingLimitExceeded`, `2 EndpointNotFound`, `3 InvalidPrice`,
-`4 InvalidAmount`, `5 NotOperator`.
-
-### Is the deployed contract working?
-
-This is the question to answer first when anything looks wrong. The smoke script runs the whole
-demo path against the **deployed** contract — register, three paid calls, a fourth that is
-correctly refused, settle, withdraw — and prints a PASS/FAIL line per step:
-
-```bash
-npm install                                    # once, at the repo root
-OPERATOR_SECRET_KEY=S... npx tsx scripts/smoke-contract.ts
-```
-
-It funds a throwaway seller from Friendbot itself, so it needs no setup beyond the operator key —
-which cannot be a throwaway, because the contract checks the caller IS its stored operator. It
-exits non-zero on any failure and takes about 35 seconds.
-
-### Build and deploy
-
-The `--operator` argument after `--` is the constructor. It must be the public key of the gateway's
-`OPERATOR_SECRET_KEY`, or every paid call fails with `NotOperator`.
-
-```bash
-cd contract
-stellar contract build --locked --optimize
-stellar contract deploy \
-  --wasm target/wasm32v1-none/release/ramp_ledger.wasm \
-  --source-account ramp402-deployer \
-  --network testnet \
-  --alias ramp_ledger \
-  -- \
-  --operator G...OPERATOR_PUBLIC_KEY
-```
-
-**Do not build contract wasm with Rust 1.81, 1.82, 1.83 or 1.91.0.** The Stellar CLI refuses
-those versions outright — they emit wasm it considers unsafe to deploy.
-`contract/rust-toolchain.toml` pins 1.90.0 so this cannot happen by accident; rustup installs
-it on first use. Bypassing the CLI with plain `cargo` on an unpinned machine can produce, and
-deploy, an artifact the CLI would have refused.
-
-Confirm the deployment is addressable, and that its operator is the one the gateway runs with:
-
-```bash
-stellar contract info interface --id <CONTRACT_ID> --network testnet
-stellar contract invoke --id <CONTRACT_ID> --network testnet \
-  --source-account ramp402-deployer -- get_operator
-```
-
-If the operator key is ever regenerated, **rotate rather than redeploy** — redeploying mints a new
-`CONTRACT_ID` that then has to be re-wired into the gateway and the frontend. The current operator
-signs the handover:
-
-```bash
-stellar contract invoke --id <CONTRACT_ID> --network testnet \
-  --source-account ramp402-operator \
-  -- set_operator --new_operator G...NEW_OPERATOR_PUBLIC_KEY
-```
-
-A wrong address there cannot be undone — only the stored operator may rotate, so rotating to a key
-nobody holds means redeploying. Read it back with `get_operator` immediately afterwards.
-
-### Tests
-
-```bash
-cd contract && cargo test          # 23 tests, no network needed
-```
-
-`contract/Cargo.lock` is committed on purpose: it pins `ed25519-dalek` to 2.2.0 around a
-`soroban-env-host` 23.0.1 resolution break that otherwise stops `cargo test` compiling on a fresh
-clone. Build with `--locked`.
-
-## Gateway
-
-Node/TypeScript. Three jobs: the x402 proxy agents pay through, the REST API the dashboard reads,
-and the SEP anchor off-ramp that turns USDC into Turkish Lira.
-
-```bash
-cd gateway
-npm install
-cp .env.example .env       # then fill it in — see the table below
-npm run dev                # http://localhost:3001
-```
-
-### Routes
-
-Exactly the ones in [CONVENTIONS.md §1.3](docs/CONVENTIONS.md). Seller routes take
-`Authorization: Bearer <privy_access_token>`; the proxy takes none, because an autonomous agent has
-no login.
-
-| Route | What it does |
-| --- | --- |
-| `POST /api/sellers/bootstrap` | First login: creates the seller row and funds the address via Friendbot. Idempotent. |
-| `POST /api/endpoints/prepare` → `/submit` | Two-step registration. The gateway builds an unsigned XDR, Privy signs it in the browser, the gateway submits it and reads the `endpoint_id` **from the contract's return value**. |
-| `GET /proxy/:proxy_slug` | The product. 402 → the agent pays → 200. Budget frozen on the pair's first call. |
-| `GET /api/endpoints`, `/api/calls`, `/api/balance` | Dashboard reads. `/api/balance` reads the chain, never the `calls` table. |
-| `POST /api/withdraw/prepare` → `/submit`, `GET /api/withdrawals/:id` | Two-step withdrawal, then poll. `/submit` answers immediately and the anchor flow runs in the background. |
-| `GET /health` | `{ ok: true }` |
-
-### Environment
-
-| Variable | Notes |
-| --- | --- |
-| `CONTRACT_ID` | The deployed `ramp_ledger` — see `## Contract`. |
-| `OPERATOR_SECRET_KEY` | Must be the key baked into that contract, or every paid call fails with `NotOperator`. `scripts/preflight.ts` checks this. |
-| `PLATFORM_POOL_SECRET_KEY` | Holds the USDC. Agents pay into it; the anchor is paid from it. |
-| `ANCHOR_HOME_DOMAIN` | `tr-mock-anchor.fly.dev` for the TRY demo. Every anchor URL and the USDC issuer are read from its `stellar.toml` — nothing is hardcoded (§1.5). |
-| `PRIVY_APP_ID`, `PRIVY_APP_SECRET` | Seller authentication. |
-| `X402_FACILITATOR_URL` | Verifies and settles agent payments. Stellar is x402 **v2** only. |
-| `UPSTREAM_CRED_ENCRYPTION_KEY` | 64 hex characters. Encrypts sellers' upstream API keys at rest. |
-| `TREASURY_ADDRESS`, `DB_PATH`, `PORT`, `STELLAR_RPC_URL`, `STELLAR_NETWORK` | |
-
-### Tests
-
-```bash
-npm test                # 286 tests, offline, no network and never ramp402.db
-npm run test:integration  # the deployed contract, the anchor and the facilitator, for real
-```
-
-The integration lane includes a **real withdrawal**: it moves 1 USDC out of the platform pool,
-through SEP-10/38/12/6, and asserts the anchor reports `completed` with an
-`external_transaction_id`. It skips itself when the environment is not configured.
-
-## Frontend
-
-Next.js. The seller dashboard and the agent console that drives the live demo.
-
-```bash
-cd frontend
-npm install
-cp .env.local.example .env.local    # NEXT_PUBLIC_GATEWAY_URL, NEXT_PUBLIC_PRIVY_APP_ID
-npm run dev                         # http://localhost:3000
-npm run check                       # typecheck, lint and a production build
-```
-
-| Page | What it is |
-| --- | --- |
-| `/` | Landing. |
-| `/dashboard` | The seller: register an endpoint, watch calls arrive, see the balance the chain reports, withdraw to TRY. |
-| `/agent-console` | A real x402 client. Funds a throwaway agent, pays per call, and shows the budget being spent and then refused. |
-
-**Signing.** Privy holds the seller's Stellar key and signs raw 32-byte hashes
-(`signRawHash` on `tx.hash()`), which spike S3 verified covers SEP-10 challenges, classic payments
-and Soroban `invoke_host_function` alike. The client wraps the signature in an
-`xdr.DecoratedSignature`. No external wallet is needed.
-
-## Demo
-
-Five minutes, in this order. Run the preflight first — it catches every failure we have actually
-hit, in about three seconds.
-
-```bash
-npx tsx scripts/preflight.ts        # expect 8/8 PASS
-npx tsx scripts/reset-demo.ts       # clean dashboard: no calls, no withdrawals
-cd gateway && npm run dev           # :3001
-cd frontend && npm run dev          # :3000
-```
-
-**1. The seller registers an API.** On `/dashboard`, log in with Privy — the account is created and
-funded by Friendbot behind the scenes, so there is nothing to explain about faucets. Register an
-endpoint with a price. The `endpoint_id` in the table came back from the contract, not from a
-counter in our database.
-
-**2. An agent pays per call.** On `/agent-console`, call the endpoint. The first request returns
-**402** with the payment requirements; the client signs a payment and retries; the second returns
-**200** with the upstream's data. The call appears on the dashboard with its transaction hash.
-
-**3. The budget holds.** The agent's budget was frozen on its first call. Keep calling: the fourth
-is refused with **403 budget_exceeded** — and it stays refused even if the client asks for a larger
-budget, because the parameter is never read again. That is a security property with a contract test
-guarding it.
-
-**4. The seller withdraws to Turkish Lira.** Click **TL'ye Çek**. The gateway zeroes the on-chain
-balance, then runs SEP-10 → SEP-38 → SEP-12 → SEP-6 in the background and pays the anchor with a
-classic payment carrying its `id` memo. The dashboard polls and shows the anchor's own status until
-it reads `completed`, with the bank reference the anchor returned.
-
-If anything looks wrong mid-demo, the answer is almost always in `npx tsx scripts/preflight.ts`.
-
-### Proving it without a browser
-
-With the gateway running, `verify-e2e.ts` walks the same journey headlessly — a throwaway agent
-funds itself, pays for three calls, gets refused on the fourth, and the seller's on-chain balance is
-checked against the 99% share:
-
-```bash
-npx tsx scripts/verify-e2e.ts       # expect 7/7 PASS, about 80 seconds
-```
-
-It spends real testnet USDC. The withdrawal step needs a seller's Privy token, which a script cannot
-mint: set `PRIVY_ACCESS_TOKEN` to include it, or leave it unset and the script says plainly that it
-skipped that step. The off-ramp itself is covered for real by
-`cd gateway && npm run test:integration`.
+---
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    subgraph Buyer
+        A[Autonomous agent<br/>x402 client, classic keypair]
+    end
+
+    subgraph Ramp402
+        G[Gateway<br/>Node + TypeScript<br/>x402 proxy · REST API · SQLite cache]
+        F[Frontend<br/>Next.js<br/>seller dashboard + agent console]
+        C[Soroban contract<br/>ramp_ledger<br/>budgets · balances · fee split]
+    end
+
+    subgraph External
+        X[x402 facilitator<br/>verify / settle]
+        U[Seller's upstream API]
+        P[Privy<br/>embedded wallet]
+        AN[tr-mock-anchor<br/>SEP-1/10/12/38/6]
+        ST[(Stellar testnet<br/>Horizon + Soroban RPC)]
+    end
+
+    A -- "GET /proxy/:slug → 402" --> G
+    A -- "retry + PAYMENT-SIGNATURE" --> G
+    G -- verify / settle --> X
+    G -- record_call / settle --> C
+    G -- server-side request --> U
+    U -- data --> G
+    G -- "200 + PAYMENT-RESPONSE" --> A
+
+    F -- REST + bearer token --> G
+    F -- login / sign XDR --> P
+    P -- signed XDR --> G
+    G -- withdraw --> C
+    G -- "SEP-10 → SEP-38 → SEP-6" --> AN
+    G -- "classic payment + memo_type id" --> AN
+    AN -- TRY payout --> F
+    C --- ST
+    G --- ST
 ```
-  agent ──402/pay──►  gateway /proxy/:slug  ──record_call──►  ramp_ledger (Soroban)
-                           │                                        │
-                           ├── forwards to the seller's upstream    ├── budget frozen per
-                           │                                        │   (agent, endpoint)
-                           └── settle 1% / 99% ────────────────────►┘
-                                                                    │
-  seller ──Privy sign──►  gateway /api/withdraw  ──withdraw()───────►┘
-                           │
-                           └── SEP-10/38/12/6 ──►  anchor  ──►  TRY to a bank account
-                                   USDC paid from the platform pool, memo_type id
+
+### Components and responsibilities
+
+| Component | Stack | Responsibility |
+| --- | --- | --- |
+| `contract/` | Rust, Soroban SDK | `ramp_ledger` — **a ledger only**. Records who spent what, enforces agent budgets, splits 1% / 99%, gates withdrawal authority. It never holds or moves tokens. |
+| `gateway/` | Node, TypeScript, Express, better-sqlite3 | The x402 reverse proxy, the REST API, the anchor off-ramp (SEP-10/38/12/6), Privy token verification, Friendbot bootstrap. Signs contract writes with one "operator" keypair. |
+| `frontend/` | Next.js, Privy | Seller dashboard (endpoints, live balance, call log, withdraw to TRY with status polling) and the agent console used to drive the demo. |
+| `scripts/` | TypeScript | `setup`, `reset-demo`, `smoke-contract`, `verify-e2e`, `preflight`. |
+
+**The chain is the source of truth for balances.** SQLite is a UI cache — endpoint list, call log,
+seller↔Privy mapping, withdrawal history — and can be rebuilt without touching anyone's money.
+
+### The x402 request flow in detail
+
+1. Agent → `GET /proxy/:proxy_slug`.
+2. Gateway → `402` with the `PAYMENT-REQUIRED` header: asset, amount, `payTo`.
+3. Agent → retry with `PAYMENT-SIGNATURE`. On the first call for an (agent, endpoint) pair the
+   `X-Agent-Budget` header is **mandatory**; missing it is a `400 missing_budget_header`. There is
+   no default budget.
+4. Gateway → facilitator `/verify`.
+5. Gateway → contract `record_call`. If this spend would exceed the frozen budget the contract
+   panics with `SpendingLimitExceeded`; the gateway returns `403 budget_exceeded` **and the hash of
+   the rejected transaction**, so the refusal is verifiable on chain.
+6. Gateway → server-side request to the seller's upstream API.
+7. **Only if the upstream returned successfully:** facilitator `/settle`, then contract `settle`
+   (1% treasury / 99% seller), then `200 OK` with `PAYMENT-RESPONSE`.
+8. If the upstream failed, the call is recorded as `upstream_failed` with `tx_hash: null`, the agent
+   is **not** charged, no revenue is credited, and the gateway returns `502`.
+
+### `ramp_ledger` — storage and signatures
+
+Persistent storage (TTL extended on every write):
+
+```
+NextEndpointId: u64
+Endpoints:      Map<u64, EndpointInfo{ seller: Address, price: i128 }>
+Budgets:        Map<(Address /*agent*/, u64 /*endpoint*/), BudgetEntry{ allocated, spent }>
+SellerBalances: Map<Address, i128>
+TreasuryTotal:  i128
 ```
 
-The contract is a **ledger**: it records who spent what and who is owed what, and never holds or
-transfers a token. USDC moves off chain from the platform pool. That is a deliberate decision, not
-an oversight — the contract custodies nothing, so there is nothing in it to steal, and no token
-transfer can fail halfway through a settlement.
+| Function | Signed by | Notes |
+| --- | --- | --- |
+| `register_endpoint(seller, upstream_price) -> u64` | **Seller** (Privy) | The contract assigns the id; nobody else invents one |
+| `record_call(operator, agent, endpoint_id, budget)` | **Gateway operator** | Budget frozen on first call; the parameter is ignored afterwards. Panics on overspend |
+| `settle(operator, endpoint_id, amount)` | **Gateway operator** | 1% treasury, 99% seller. Rounding never favours the user |
+| `withdraw(seller) -> i128` | **Seller** (Privy) | Zeroes the seller's balance. Only the seller can do this |
+| `get_balance(seller) -> i128` | — | View, backs `GET /api/balance` |
+| `get_endpoint(endpoint_id) -> EndpointInfo` | — | View |
 
-Full reasoning in [docs/TECHNICAL.md](docs/TECHNICAL.md); the interfaces all three components build
-against are in [docs/CONVENTIONS.md](docs/CONVENTIONS.md).
+Six unit tests, all green: id counter increments · budget frozen on first call · overspend panics ·
+1%/99% split and rounding · unauthorised `withdraw` panics · balance is zero after `withdraw`. The
+"a later, larger `X-Agent-Budget` must not raise the limit" case is a security property with its own
+test.
 
-## Team
-
-Built for the Stellar Pro Hackathon, Genesis Track, 19–20 September 2026.
+### Stellar integrations and protocols used
 
 | | |
 | --- | --- |
-| Efe | `contract/` — the `ramp_ledger` Soroban contract, deployment and the verification scripts |
-| Ömer | `gateway/` — the x402 proxy, the REST API and the anchor off-ramp |
-| Mert | `frontend/` — the seller dashboard and the agent console |
+| **Soroban** | `ramp_ledger`, deployed to testnet: `CC73BWETYN2PWAO6YPDLX4H75XUUMH4HDQQJMJYQPY2SW3PE2TEP4CVJ` |
+| **x402 v2** | `@x402/core`, `@x402/express`, `@x402/fetch`, `@x402/stellar` — facilitator: https://x402.org/facilitator |
+| **Privy** | Email login + embedded Stellar wallet; server-side access-token verification |
+| **SEP-1** | Anchor discovery — every endpoint, the issuer and the signing key come from `stellar.toml` |
+| **SEP-10** | Anchor authentication (JWT; re-auth automatically on 401) |
+| **SEP-12** | KYC; the form is generated from the anchor's own `fields` response, not hardcoded |
+| **SEP-38** | Live USDC→TRY quote; the rate is never written into the code |
+| **SEP-6** | Withdraw (and deposit for the on-ramp leg), polled to `completed` |
+| **Horizon / Soroban RPC** | Classic payment with `memo_type: id`, transaction submission, contract reads |
+| **Friendbot** | Automatic funding of newly created seller accounts |
+| Anchor home domain | `tr-mock-anchor.fly.dev` |
+| USDC issuer (testnet) | `GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5` |
+| Network | Stellar **testnet** |
+
+Nothing that `stellar.toml` can tell us is hardcoded: issuer, endpoints and limits are all read from
+the anchor at runtime.
+
+---
+
+## Key design decisions and trade-offs
+
+**The budget lives in our contract, not in a smart-account policy.** The obvious design is an
+OpenZeppelin smart account with a spending-limit policy, so the payment itself is refused on chain.
+It does not work today: `@x402/stellar` cannot pay from a Soroban smart account — it treats the
+`C…` address as an ed25519 public key ([x402#3158](https://github.com/x402-foundation/x402/issues/3158)) —
+and the default 50,000-stroop fee rejects a payer whose `__check_auth` calls another contract
+([x402#3515](https://github.com/x402-foundation/x402/issues/3515)). We timeboxed the attempt, then
+moved the limit into `record_call`. Trade-off: the refusal happens one step later, in our ledger
+instead of in the payment itself — but it is still on chain, still enforced by contract code, and
+still produces a transaction hash the agent can verify.
+
+**The contract never holds funds. It is a ledger; the pool is custodial.** `payTo` is a classic
+platform collection account. Two reasons, both practical: a Soroban contract has no "funds received"
+hook for SAC transfers, so it could not split a payment it was handed; and a contract-originated
+transfer arrives as `invoke_host_function`, which the anchor's Horizon watcher cannot match against
+`memo_type: id`, so the withdrawal would hang forever. We say the word **custodial** plainly — MVP
+revenue sits in a platform pool, and the contract holds the accounting and the withdrawal
+authority, not the money. The roadmap fix is `payTo` set to the seller's own address with a periodic
+fee batch.
+
+**The anchor is always paid with a classic payment operation and `memo_type: id`** — never a
+contract call, never a text memo. This is what makes the payout matchable.
+
+**The gateway is a trusted operator, and here is exactly what that means.** `record_call` and
+`settle` are signed by a single operator keypair so the agent does not have to sign twice per
+request. The payment itself is verified cryptographically by the facilitator. So a malicious gateway
+could misattribute a call to the wrong agent — it could **not** forge a payment or mint a balance —
+and the seller's money can only be moved by the seller's own signature.
+
+**No sessions.** The budget is keyed on (agent, endpoint) and frozen on the first call. A session
+layer would have meant extra state in both the contract and the gateway, extra concurrency failure
+modes, and an identifier the agent has to carry — for nothing that x402's stateless model needs.
+
+**x402 rather than an MPP session.** A single call should not require opening a session or
+pre-funding one. High-frequency callers are exactly what MPP Session is for, and that is on the
+roadmap; the first-call case is not.
+
+**One integration, on purpose.** We could have bolted on a second protocol for the requirement
+table. Instead we spent that time making every failure state of the existing flow real —
+`upstream_failed`, `budget_exceeded`, `pending_trust`, expired JWT, expired quote. The state machine
+is the product, not the happy path.
+
+**SQLite as the off-chain store.** A JSON file would race under parallel calls during the demo; a
+real database would be setup cost for a single-process backend. Balance integrity does not depend on
+it either way — the chain is authoritative.
+
+---
+
+## Technical challenges and how we solved them
+
+| Challenge | Resolution |
+| --- | --- |
+| x402 on Stellar speaks **v2 only** — there is no v1 entry for Stellar at the facilitator | Headers are `PAYMENT-REQUIRED` / `PAYMENT-SIGNATURE` / `PAYMENT-RESPONSE`, not the v1 `X-PAYMENT` names. Package versions are pinned, because the facilitator's protocol version is coupled to them |
+| On-chain budget enforcement with smart accounts unavailable (#3158 / #3515) | Budget moved into `record_call`; rejection returns 403 plus the rejected transaction hash |
+| A Privy embedded wallet is a keypair, not a funded Stellar account — so `require_auth()` fails | The gateway funds new sellers via Friendbot during bootstrap. The user never sees this step; it is what keeps onboarding to seconds |
+| Payment taken, upstream API down | Real state, not an edge case: `settle` moved to *after* a successful upstream response. The agent is not charged, the row is stored as `upstream_failed` with `tx_hash: null`, the gateway returns 502 |
+| Contract payment invisible to the anchor | All anchor-bound USDC leaves as a classic payment with `memo_type: id` |
+| KYC fields differ between anchors | The SEP-12 form is rendered from the anchor's returned `fields` map. Nothing about the form is hardcoded, which is also what makes the flow portable to another anchor |
+| Soroban `persistent` storage expiring mid-demo | TTL is extended on every contract write |
+| Seller's upstream credentials | Stored encrypted, decrypted only inside the proxy process. A seller who does not want that can self-host the gateway; an SDK is on the roadmap |
+
+---
+
+## What is real and what is simulated
+
+We would rather say this than have it discovered.
+
+- **Real:** the Stellar side. Real testnet USDC, real x402 payments verified by the facilitator, a
+  real Soroban contract with real transaction hashes, real SEP-1/10/12/38/6 calls against a live
+  anchor, real classic payments with memos.
+- **Simulated:** the bank leg and KYC. tr-mock-anchor is a test anchor — it approves KYC
+  automatically and simulates the TRY transfer. Mock-only code paths are isolated and marked
+  `// MOCK ANCHOR ONLY`.
+- **Custodial:** MVP revenue sits in a platform collection account until the seller withdraws.
+- **Testnet:** nothing here runs on mainnet. Going to mainnet means a licensed anchor, a bank
+  relationship and real KYC — an institution we do not operate. The integration code is portable;
+  the anchor is not a config value.
+
+---
+
+## Getting started
+
+Requirements: Node 22 or newer (see the note below), Rust with the `wasm32v1-none` target,
+`stellar` CLI, a Privy app.
+
+```bash
+git clone https://github.com/SweetieBirdX/ramp402.git
+cd ramp402
+
+# 1) contract
+cd contract
+cargo test
+stellar contract build
+# deploy to testnet, note the contract id
+
+# 2) gateway
+cd ../gateway
+cp .env.example .env     # fill in: CONTRACT_ID, OPERATOR_SECRET, PRIVY_APP_ID,
+                         # PRIVY_APP_SECRET, ANCHOR_HOME_DOMAIN, FACILITATOR_URL, ALLOWED_ORIGINS
+npm install
+npm test
+npm run dev
+
+# 3) frontend
+cd ../frontend
+cp .env.local.example .env.local   # NEXT_PUBLIC_GATEWAY_URL, NEXT_PUBLIC_PRIVY_APP_ID
+npm install
+npm run check
+npm run dev
+
+# 4) one-time environment setup (accounts, trustline, treasury, demo endpoint)
+npx tsx scripts/setup.ts
+```
+
+> **Node version.** `gateway/package.json` pins `"engines": { "node": ">=22" }`, and the deployed
+> gateway follows the same pin via `railway.json`. This is not cosmetic: `better-sqlite3@13.0.3` is
+> a native module whose prebuilt binary is compiled against a specific Node ABI (v22 is ABI 127), so
+> a runtime on a different major would fall back to compiling from source and need Python and a
+> build toolchain. We develop and deploy on v22.16.0. Note that `engines` is advisory — npm only
+> warns unless `engine-strict` is set — so check `node -v` before reporting a native-module install
+> failure.
+
+Pinned versions verified end to end: `@x402/*` `2.26.0`, `@stellar/stellar-sdk` `17.1.0`.
+
+### Verification
+
+Every component verifies itself with one command:
+
+| Command | What it proves |
+| --- | --- |
+| `cd contract && cargo test` | The six contract unit tests |
+| `npx tsx scripts/smoke-contract.ts` | The **deployed** contract works on chain: register → record → settle → balance → withdraw |
+| `cd gateway && npm test` | Route contract, budget logic, error codes |
+| `cd frontend && npm run check` | Typecheck, lint, production build |
+| `npx tsx scripts/verify-e2e.ts` | The full four-step demo over the live API, PASS/FAIL per step |
+| `npx tsx scripts/preflight.ts` | Submission readiness: no leaked secrets, the README's contract id really is deployed, env complete, live URLs responding |
+| `npx tsx scripts/reset-demo.ts` | Resets the demo state between runs |
+
+---
+
+## Deployed artifacts
+
+| | |
+| --- | --- |
+| Frontend (live demo) | https://ramp402.vercel.app/ |
+| Gateway API | https://ramp402-production.up.railway.app/ (`/health` → `{ ok: true }`) |
+| `ramp_ledger` contract id | `CC73BWETYN2PWAO6YPDLX4H75XUUMH4HDQQJMJYQPY2SW3PE2TEP4CVJ` |
+| Contract on explorer | https://stellar.expert/explorer/testnet/contract/CC73BWETYN2PWAO6YPDLX4H75XUUMH4HDQQJMJYQPY2SW3PE2TEP4CVJ |
+| x402 facilitator | https://x402.org/facilitator |
+| Anchor home domain | `https://tr-mock-anchor.fly.dev` |
+| Platform collection account | `GA6UDAI55VG36CM7SQSKOVWL4AAHYYOBJSS4JPYUJME5ILMJP235JYQB` |
+| Network | Stellar testnet |
+
+---
+
+## Where the demand comes from, and what comes next
+
+We make no traction claim. Nobody onboarded onto the live gateway during the event, and we would
+rather say that than inflate a number.
+
+What the idea rests on instead is that it does not require a new market to appear first. The
+developers we built this for already sell abroad and already pay to get that money home: a
+percentage fee to a collection provider, an FX spread they do not control, and days of waiting for
+a settlement they cannot see. That is an existing budget line with an existing bill attached, not a
+stakeholder who has to be talked into caring. The same holds on the buying side — paying per request
+without an account or a subscription is useful to a script or a cron job today, and autonomous
+agents are the sharpest case of that friction rather than the only one.
+
+So the bet is not "agents will start paying for APIs one day". It is that a cost people are paying
+right now can be paid less of, on a rail they can watch settle.
+
+Next steps, in order:
+
+1. **InstAward** application immediately after the event.
+2. **SCF Build Award — Integration Track** as the intended funding path, building on the Privy
+   integration and the anchor flow shipped here.
+3. Licensed anchor and a non-custodial `payTo`: revenue routed straight to the seller's address with
+   a periodic fee batch.
+4. `@ramp402/gateway-sdk` so a seller can self-host the proxy and keep their own upstream keys.
+5. MPP Session for high-frequency callers, alongside the per-call x402 path.
+6. A second exit country — same code, different home domain — and a swap layer for routing between
+   issuers.
+
+The team shipped this in 36 hours across three parallel workstreams with a shared conventions
+document, folder ownership and automated verification; the same process carries into the next
+milestone.
+
+---
+
+## Stellar skills used
+
+We installed the official [`stellar/stellar-dev-skill`](https://github.com/stellar/stellar-dev-skill)
+plugin (`stellar-dev` v1.2.0) at the start of the build and worked from it. These are the skill
+files the project draws on, by area:
+
+| Path | Drawn on for |
+| --- | --- |
+| `skills/smart-contracts/SKILL.md` | Soroban contract patterns, persistent storage and TTL extension in `ramp_ledger` |
+| `skills/standards/SKILL.md` | Choosing and reading the right SEPs for the anchor leg — SEP-1 discovery, SEP-10 auth, SEP-12 KYC fields, SEP-38 quotes, SEP-6 withdraw |
+| `skills/agentic-payments/SKILL.md` | The x402 flow and its header semantics |
+| `skills/dapp/SKILL.md` | Privy signing and the frontend wallet flow |
+| `skills/assets/SKILL.md` | Trustlines, `pending_trust` and claimable balances |
+| `skills/data/SKILL.md` | Horizon / RPC queries and matching the anchor payout by memo |
+
+Paths are relative to the plugin's own repository. The plugin also ships `cross-chain` and
+`zk-proofs`; neither is relevant to Ramp402 and neither was used.
+
+We also used the **Raven** MCP server (`https://raven.stellar.buzz/mcp`) to query live Stellar
+documentation rather than rely on remembered details.
+
+---
+
+## Team
+
+**Ramp402** — Genesis Track
+
+| Name | Role | Contact |
+| --- | --- | --- |
+| Eyüp Efe Karakoca | Team lead · Soroban contract, repo | [GitHub](https://github.com/SweetieBirdX) · [LinkedIn](https://www.linkedin.com/in/eyupefekarakoca/) · [X](https://x.com/EyupEfeKrkc) |
+| Ömer Altundağ | Gateway, x402 flow, anchor integration | [GitHub](https://github.com/OmerAltundagX) · [LinkedIn](https://www.linkedin.com/in/ömer-altundağ-424179399) · [X](https://x.com/OmerA34361) |
+| Mert Ahmet Bayazıt | Frontend, seller dashboard, agent console | [GitHub](https://github.com/MertBayazit) · [LinkedIn](https://www.linkedin.com/in/mertahmetbayazit7a9841320/) |
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
