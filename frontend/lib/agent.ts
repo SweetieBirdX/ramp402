@@ -21,7 +21,6 @@ import type { BudgetExceededResponse, UpstreamFailedResponse } from "./types";
 
 export const HORIZON_TESTNET_URL = "https://horizon-testnet.stellar.org";
 export const SOROBAN_TESTNET_RPC = "https://soroban-testnet.stellar.org";
-export const FRIENDBOT_URL = "https://friendbot.stellar.org";
 /**
  * The USDC issuer, discovered from the anchor's stellar.toml rather than hardcoded (§1.5) — the
  * same way the gateway resolves it in `gateway/src/anchor/toml.ts`. The mainnet issuer differs, and
@@ -177,17 +176,32 @@ export async function getAgentBalances(publicKey: string): Promise<AgentBalances
 }
 
 /**
- * Funds an address from Friendbot with 10,000 testnet XLM.
+ * Fund an address with testnet XLM, through our own server rather than the faucet directly.
+ *
+ * The browser never talks to Friendbot. `app/api/fund/route.ts` makes the call, treats the
+ * "account already funded to starting balance" 400 as success, confirms the account on Horizon
+ * before answering, and reports a genuine faucet failure as a failure instead of letting a later
+ * step die with "account not found".
  */
 export async function fundWithFriendbot(publicKey: string): Promise<boolean> {
-  const url = `${FRIENDBOT_URL}/?addr=${encodeURIComponent(publicKey)}`;
-  const res = await fetch(url);
-  if (res.ok) return true;
-  const text = await res.text();
-  if (text.includes("op_already_exists") || text.includes("already funded")) {
-    return true;
-  }
-  throw new Error(`Friendbot funding refused: ${text.slice(0, 150)}`);
+  const res = await fetch("/api/fund", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address: publicKey }),
+  });
+
+  const body = (await res.json().catch(() => ({}))) as {
+    funded?: boolean;
+    message?: string;
+    friendbot_status?: number;
+    friendbot_body?: string;
+  };
+
+  if (res.ok && body.funded) return true;
+
+  // Surface the faucet's own words. "Funding failed" alone is untraceable.
+  const detail = body.friendbot_body ? ` (friendbot ${body.friendbot_status}: ${body.friendbot_body})` : "";
+  throw new Error(`${body.message ?? "Funding failed"}${detail}`);
 }
 
 /**

@@ -277,21 +277,19 @@ export async function callProxy(
   const baseUrl = getGatewayUrl();
   const url = `${baseUrl}/proxy/${encodeURIComponent(proxy_slug)}`;
 
-  try {
-    return await fetch(url, {
-      method: "GET",
-      headers,
-      signal: options?.signal,
-    });
-  } catch (err: unknown) {
-    if (typeof window !== "undefined") {
-      const fallbackUrl = `/api/proxy/${encodeURIComponent(proxy_slug)}`;
-      return fetch(fallbackUrl, {
-        method: "GET",
-        headers,
-        signal: options?.signal,
-      });
-    }
-    throw err;
-  }
+  // ONE path to the gateway: straight there, relying on the gateway's CORS (gateway/src/cors.ts),
+  // which exposes PAYMENT-REQUIRED and PAYMENT-RESPONSE so the client can read them.
+  //
+  // There used to be a second path — a silent fall back to the Next route /api/proxy/:slug when
+  // this fetch threw. Two paths meant the x402 exchange could be answered by whichever one
+  // happened to work, and that route turned any failure into a 500, so a 402 challenge arrived as
+  // a server error and the protocol stopped dead. The route is gone and so is the fallback.
+  //
+  // The Response is returned raw and unexamined: 402 is a normal, expected answer here, not an
+  // error, and the caller needs the status, the headers and the body exactly as they arrived.
+  return await fetch(url, {
+    method: "GET",
+    headers,
+    signal: options?.signal,
+  });
 }

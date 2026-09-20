@@ -3,6 +3,7 @@
 import dotenv from "dotenv";
 import express, { type RequestHandler } from "express";
 import { createBootstrapHandler, type BootstrapDeps } from "./bootstrap.js";
+import { allowedOriginsFromEnv, createCors } from "./cors.js";
 import { createEndpointRoutes, type EndpointRouteDeps } from "./endpointRoutes.js";
 import { errorHandler, HttpError, notFoundHandler, validate } from "./errors.js";
 import { createProxyHandler, type ProxyDeps } from "./proxyRoute.js";
@@ -22,6 +23,8 @@ export interface AppDeps
     WithdrawRouteDeps {
   /** Seller auth (createAuthMiddleware): 401 or sets req.privyUserId / req.seller. */
   authenticate: RequestHandler;
+  /** Browser origins allowed to call the gateway. Defaults to ALLOWED_ORIGINS from the env. */
+  allowedOrigins?: string[];
 }
 
 export interface AppOptions {
@@ -48,6 +51,11 @@ export function createApp(deps: AppDeps, options: AppOptions = {}): express.Expr
   app.disable("x-powered-by");
 
   if (options.log ?? true) app.use(requestLogger);
+
+  // Before the body parser and before every route, so OPTIONS preflights are answered without
+  // touching auth or JSON parsing. The browser sends those unauthenticated by design.
+  app.use(createCors({ allowedOrigins: deps.allowedOrigins ?? allowedOriginsFromEnv() }));
+
   app.use(express.json());
 
   app.get("/health", (_req, res) => {
