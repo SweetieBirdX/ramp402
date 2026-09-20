@@ -11,6 +11,7 @@ import { getStellar, scv } from "./stellar.js";
 import { payoutConfigFromEnv } from "./anchor/payout.js";
 import { resolveAnchor, withdrawMinimum } from "./anchor/index.js";
 import { createWithdrawalJobs } from "./withdrawalJob.js";
+import { resolve } from "node:path";
 import { Keypair } from "@stellar/stellar-sdk";
 
 // Everything is built at startup, so a missing env var fails here and not on the first request.
@@ -67,10 +68,22 @@ const app = createApp({
   },
 });
 
+// PORT is assigned by the host (Railway sets it); 3001 is only the local default.
 const port = Number(process.env.PORT) || 3001;
+
+// No host argument on purpose. Node then binds the unspecified address — `::` with dual-stack
+// where IPv6 exists, `0.0.0.0` where it does not — so the process is reachable from outside the
+// container either way. Do NOT "fix" this to "0.0.0.0": that is IPv4-only, and Railway's private
+// networking between services is IPv6, so hardcoding it would make this gateway unreachable there.
+// Binding "localhost" would be worse still: reachable from nothing but the container itself.
 app.listen(port, async () => {
   console.log(`ramp402 gateway listening on :${port}`);
   console.log(`anchor: ${anchorHomeDomain}`);
+  // The SQLite cache is a cache (§1.4). On a host with an ephemeral filesystem this path is wiped
+  // on every deploy and restart unless DB_PATH points at a mounted volume — so print it, because
+  // "the dashboard is empty again" is otherwise a mystery rather than a setting.
+  const dbPath = process.env.DB_PATH?.trim() || "ramp402.db";
+  console.log(`sqlite cache: ${resolve(dbPath)}${process.env.DB_PATH?.trim() ? "" : "  (DB_PATH unset — relative to the working directory)"}`);
 
   // A restart must not strand a withdrawal in `pending` for ever: pick up anything that already
   // reached the anchor and keep polling it.
