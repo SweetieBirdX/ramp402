@@ -46,6 +46,9 @@ beforeEach(() => {
   app = createApp(
     {
       repo,
+      // Inert: this suite registers endpoints, it never withdraws (see withdrawRoutes' own suite).
+      startAnchorFlow: () => {},
+      anchorHomeDomain: "anchor.test",
       authenticate: createAuthMiddleware({ verifyToken, repo }),
       findStellarWallet: async () => null,
       funder: createFunder({ accountExists: async () => true, friendbotUrl: undefined }),

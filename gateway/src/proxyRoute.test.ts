@@ -61,6 +61,9 @@ beforeEach(() => {
   app = createApp(
     {
       repo,
+      // Inert: the proxy is the agent's side of the product and never touches the off-ramp.
+      startAnchorFlow: () => {},
+      anchorHomeDomain: "anchor.test",
       authenticate: createAuthMiddleware({ verifyToken: async () => "unused", repo }),
       findStellarWallet: async () => null,
       funder: createFunder({ accountExists: async () => true, friendbotUrl: undefined }),

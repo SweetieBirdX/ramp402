@@ -63,6 +63,9 @@ beforeEach(() => {
   app = createApp(
     {
       repo,
+      // Inert: these are the dashboard's read routes, which start no anchor flow.
+      startAnchorFlow: () => {},
+      anchorHomeDomain: "anchor.test",
       authenticate: createAuthMiddleware({ verifyToken, repo }),
       findStellarWallet: async () => null,
       funder: createFunder({ accountExists: async () => true, friendbotUrl: undefined }),

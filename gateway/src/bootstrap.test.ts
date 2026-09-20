@@ -72,6 +72,10 @@ beforeEach(() => {
   app = createApp(
     {
       repo,
+      // This suite never withdraws, so the anchor side is inert — but AppDeps requires it, and
+      // leaving it out is what silently drifted the fixtures out of typecheck.
+      startAnchorFlow: () => {},
+      anchorHomeDomain: "anchor.test",
       authenticate: createAuthMiddleware({ verifyToken, repo }),
       findStellarWallet: async (privyUserId) => {
         net.calls.privyLookup++;

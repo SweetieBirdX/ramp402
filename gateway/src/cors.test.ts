@@ -101,6 +101,10 @@ describe("CORS on the gateway", () => {
       .set("Access-Control-Request-Headers", "authorization");
 
     expect(res.status).toBe(204);
-    expect(res.headers["access-control-allow-headers"].toLowerCase()).toContain("authorization");
+    // Asserted as its own step rather than through an optional chain: a missing header is the
+    // failure this test exists to catch, so it must read as a failed assertion, not a TypeError.
+    const allowHeaders = res.headers["access-control-allow-headers"];
+    expect(allowHeaders).toBeDefined();
+    expect(String(allowHeaders).toLowerCase()).toContain("authorization");
   });
 });
