@@ -235,15 +235,21 @@ describe("paid path", () => {
   });
 });
 
-describe("upstream failure: paid, logged honestly, seller not credited", () => {
+describe("upstream failure: nobody is charged, logged honestly, seller not credited", () => {
   const expectUpstreamFailed = async (reason: RegExp) => {
     const res = await call({ budget: "5000000" });
     expect(res.status).toBe(502);
     expect(res.body).toEqual({ error: "upstream_failed", message: expect.stringMatching(reason) });
-    expect(x402.settled).toEqual([AGENT]); // the payment WAS taken
-    expect(res.headers["payment-response"]).toBe("receipt:payment-1"); // and the agent gets the receipt
-    expect(contract.settles).toEqual([]); // but settle is NOT called
-    expect(callRows()).toEqual([expect.objectContaining({ status: "upstream_failed", tx_hash: "payment-1", amount_stroops: PRICE })]);
+    // §1.3: the seller did not deliver, so the payment is cancelled rather than settled and the
+    // agent's USDC never moves. No settlement means no receipt, so PAYMENT-RESPONSE is absent —
+    // it exists only on the 200 path.
+    expect(x402.settled).toEqual([]);
+    expect(x402.cancelled).toEqual([{ payer: AGENT, status: 502 }]);
+    expect(res.headers["payment-response"]).toBeUndefined();
+    expect(contract.settles).toEqual([]); // and the seller is not credited either
+    // The row is still written so the seller's dashboard shows the endpoint failing, with no
+    // tx_hash because no transaction happened.
+    expect(callRows()).toEqual([expect.objectContaining({ status: "upstream_failed", tx_hash: null, amount_stroops: PRICE })]);
   };
 
   it("non-2xx → 502", async () => {
@@ -264,6 +270,8 @@ describe("upstream failure: paid, logged honestly, seller not credited", () => {
     await expectUpstreamFailed(/network error/);
   });
 
+  // §1.3 "Known limitation": record_call runs before the upstream request and the contract has no
+  // inverse, so a failed delivery still consumes the agent's budget even though it costs it nothing.
   it("the budget stays spent: a failed call still counts against it", async () => {
     upstream.respond = async () => new Response("boom", { status: 503 });
     await call({ budget: "1000000" });
@@ -272,11 +280,15 @@ describe("upstream failure: paid, logged honestly, seller not credited", () => {
 });
 
 describe("rarer failures", () => {
-  it("payment settlement failing after record_call → the library's response, no upstream call, logged", async () => {
+  it("payment settlement failing after a successful upstream → the library's response, not logged as paid", async () => {
     x402.setSettleFails(true);
     const res = await call({ budget: "5000000" });
     expect(res.status).toBe(402);
-    expect(upstream.calls).toHaveLength(0);
+    // Settlement is now the last thing tried, so the upstream HAS been called by this point — the
+    // seller answered and we still could not take the money. Nothing is written and the seller is
+    // not credited, so the row and the ledger stay consistent with an uncharged agent.
+    expect(upstream.calls).toHaveLength(1);
+    expect(contract.settles).toEqual([]);
     expect(callRows()).toEqual([]);
     expect(logs.join("\n")).toMatch(/payment settlement failed/);
   });

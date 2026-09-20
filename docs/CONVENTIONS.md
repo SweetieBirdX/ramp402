@@ -259,8 +259,14 @@ the gateway builds an unsigned transaction and the frontend returns it signed.
 
   Budget exceeded → `403` with `{ "error": "budget_exceeded" }` plus the rejected transaction hash.
 
-  Upstream returned non-2xx / timed out → write a `calls` row with status `upstream_failed`, do
-  **not** call `settle`, return `502` with `{ "error": "upstream_failed" }`.
+  Upstream returned non-2xx / timed out → cancel the x402 payment instead of settling, so
+  the agent is never debited. Write a `calls` row with status `upstream_failed` and
+  `tx_hash: null` (the seller's dashboard needs to see its endpoint failing), do not call
+  `settle`, and return 502 with `{ "error": "upstream_failed" }`.
+
+  Known limitation: `record_call` runs before the upstream request, so the agent's on-chain
+  budget is consumed by a failed delivery. The contract exposes no inverse of `record_call`;
+  a refund path would require a new entry point. Documented, not built.
 
 ---
 

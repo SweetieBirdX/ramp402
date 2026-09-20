@@ -76,7 +76,7 @@ export default function AddEndpointModal({
   const { signRawHash } = useSignRawHash();
 
   const [upstreamUrl, setUpstreamUrl] = useState("");
-  const [priceUsdc, setPriceUsdc] = useState("0.1");
+  const [priceUsdc, setPriceUsdc] = useState("0.50"); // the demo price (scripts/lib/demo.ts DEMO_PRICE_STROOPS)
   const [step, setStep] = useState<StepState>("idle");
   const [errorInfo, setErrorInfo] = useState<ErrorInfo | null>(null);
   const [successResult, setSuccessResult] = useState<SubmitEndpointResponse | null>(null);
@@ -113,7 +113,7 @@ export default function AddEndpointModal({
     setErrorInfo(null);
     setSuccessResult(null);
     setUpstreamUrl("");
-    setPriceUsdc("0.1");
+    setPriceUsdc("0.50");
     setCopiedProxy(false);
   };
 

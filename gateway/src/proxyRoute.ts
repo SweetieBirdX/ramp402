@@ -5,11 +5,14 @@
 //   2. x402: verify PAYMENT-SIGNATURE → 402 PAYMENT-REQUIRED when absent or invalid (nothing charged)
 //   3. record_call on-chain           → 400 missing_budget_header / 403 budget_exceeded (nothing charged:
 //                                       the verified payment is cancelled, never settled)
-//   4. x402: settle the payment       → the agent's USDC moves to the platform pool
-//   5. upstream request, 10 s timeout → failure: 502 upstream_failed, call logged, NO contract settle
+//   4. upstream request, 10 s timeout → failure: the payment is cancelled, 502 upstream_failed,
+//                                       call logged with a null tx_hash, no contract settle
+//   5. x402: settle the payment       → the agent's USDC moves to the platform pool
 //   6. contract settle, log the call  → 200 with the upstream body and PAYMENT-RESPONSE
 //
-// Budget enforcement (3) runs before the money moves (4), so a refused agent is never charged.
+// Nothing is charged until the seller has actually delivered: both the budget check (3) and the
+// upstream call (4) come before the money moves (5), so a refused or undelivered call costs the
+// agent nothing. PAYMENT-RESPONSE therefore exists only on the 200 path.
 import type { Request, RequestHandler, Response } from "express";
 import type { CredentialCipher } from "./credentials.js";
 import { HttpError, validate } from "./errors.js";
@@ -90,17 +93,14 @@ export function createProxyHandler(deps: ProxyDeps): RequestHandler {
       throw new HttpError(404, "endpoint_not_found", `Endpoint ${endpoint.id} is not registered on the contract`);
     }
 
-    // 4. Take the money.
-    const settlement = await payment.settle();
-    if (!settlement.ok) {
-      // The budget was already charged on-chain for a payment that did not go through. Rare (the
-      // payment verified moments ago); logged so it can be reconciled by hand.
-      log(`proxy ${proxy_slug}: payment settlement failed for ${agent} after record_call ${recorded.txHash}: ${settlement.reason}`);
-      return send(res, settlement.response);
-    }
-    for (const [k, v] of Object.entries(settlement.headers)) res.setHeader(k, v);
-
-    // 5. The seller's API. Credentials are decrypted only here, only for this request.
+    // 4. The seller's API, BEFORE the money moves. Credentials are decrypted only here, only for
+    //    this request.
+    //
+    //    The upstream request now sits inside the verified payment's validity window: the agent's
+    //    signed authorisation has to still be settleable when we come back. `UPSTREAM_TIMEOUT_MS`
+    //    (10 s, upstream.ts) is what bounds that wait, and `callUpstream` never throws, so the
+    //    window is closed either way. Raising that timeout lengthens the gap between verify and
+    //    settle — keep it far below the scheme's authorisation lifetime.
     const credentials = endpoint.upstream_credentials_enc ? deps.credentialCipher.decrypt(endpoint.upstream_credentials_enc) : null;
     const upstream = await callUpstream({
       upstreamUrl: endpoint.upstream_url,
@@ -112,21 +112,35 @@ export function createProxyHandler(deps: ProxyDeps): RequestHandler {
     });
 
     if (!upstream.ok) {
-      // Paid, but the seller did not deliver: logged honestly, and the seller earns nothing (no settle).
-      // TODO(refunds): the agent's payment stays in the platform pool. A refund path would send it back
-      // and move this row to `refunded` — the status exists so the UI can already show it. Not built.
+      // The seller did not deliver, so nobody is charged: the verified payment is cancelled rather
+      // than settled and the agent's USDC never leaves its account (§1.3). The row is still written
+      // — with no tx_hash, because no transaction happened — so the seller's dashboard shows the
+      // endpoint failing. What stays unfair is the on-chain budget: record_call already ran and the
+      // contract has no inverse, so this attempt still counts against the agent's limit (§1.3,
+      // "Known limitation").
+      await payment.cancel(502);
       deps.repo.insertCall({
         endpoint_id: endpoint.id,
         agent_address: agent,
         amount_stroops: endpoint.price_stroops,
         status: "upstream_failed",
-        tx_hash: settlement.txHash,
+        tx_hash: null,
       });
-      log(`proxy ${proxy_slug}: upstream failed (${upstream.reason}) — payment ${settlement.txHash} taken, not settled to the seller`);
+      log(`proxy ${proxy_slug}: upstream failed (${upstream.reason}) — payment cancelled, ${agent} not debited`);
       const body: UpstreamFailedResponse = { error: "upstream_failed", message: `The seller's API did not answer successfully: ${upstream.reason}` };
       res.status(502).json(body);
       return;
     }
+
+    // 5. The upstream delivered, so now take the money.
+    const settlement = await payment.settle();
+    if (!settlement.ok) {
+      // The budget was already charged on-chain for a payment that did not go through. Rare (the
+      // payment verified moments ago); logged so it can be reconciled by hand.
+      log(`proxy ${proxy_slug}: payment settlement failed for ${agent} after record_call ${recorded.txHash}: ${settlement.reason}`);
+      return send(res, settlement.response);
+    }
+    for (const [k, v] of Object.entries(settlement.headers)) res.setHeader(k, v);
 
     // 6. Credit the seller on the ledger, log the call, deliver.
     try {
