@@ -78,8 +78,16 @@ describe.skipIf(!ready)(`anchor off-ramp (network, ${anchorDomain ?? "unconfigur
       expect(result.externalTransactionId).toEqual(expect.any(String));
 
       // The flow reported its way through, rather than jumping from nothing to done.
-      const seen = progress.map((p) => p.anchorStatus);
-      expect(seen).toContain("pending_user_transfer_start");
+      //
+      // Asserted on OUR stages, not the anchor's status. Whether `pending_user_transfer_start` is
+      // ever *observed* depends on the anchor being slower than one poll interval: tr-mock-anchor
+      // settles the whole withdrawal in about five seconds against a 2 s poll, so the intermediate
+      // SEP-6 status can be gone before we look. Asserting on it measured the anchor's speed and
+      // failed on a withdrawal that had completed correctly. Our stages are emitted by this code,
+      // in order, on every run.
+      const stages = progress.map((p) => p.stage);
+      expect(stages).toEqual(expect.arrayContaining(["authenticating", "quoting", "initiating", "paying"]));
+      expect(stages.indexOf("paying")).toBeGreaterThan(stages.indexOf("quoting"));
     },
   );
 });
