@@ -82,6 +82,7 @@ export function fakeGate() {
   const cancelled: Array<{ payer: string; status: number }> = [];
   let seq = 0;
   let settleFails = false;
+  let cancelFails = false;
 
   const gate: PaymentGate = {
     async process(req, priceStroops) {
@@ -100,12 +101,21 @@ export function fakeGate() {
         },
         async cancel(status) {
           cancelled.push({ payer, status });
+          // A facilitator that will not take the cancellation. Nothing was charged either way — the
+          // payment is simply never settled — so the refusal the caller already decided must stand.
+          if (cancelFails) throw new Error("facilitator refused the cancellation");
         },
       };
       return { kind: "verified", payment };
     },
   };
-  return { gate, settled, cancelled, setSettleFails: (v: boolean) => void (settleFails = v) };
+  return {
+    gate,
+    settled,
+    cancelled,
+    setSettleFails: (v: boolean) => void (settleFails = v),
+    setCancelFails: (v: boolean) => void (cancelFails = v),
+  };
 }
 
 /** For apps whose tests never reach /proxy. */

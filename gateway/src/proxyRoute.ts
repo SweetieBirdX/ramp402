@@ -16,7 +16,7 @@
 import type { Request, RequestHandler, Response } from "express";
 import type { CredentialCipher } from "./credentials.js";
 import { HttpError, validate } from "./errors.js";
-import type { PaymentGate, PaymentResponseInstructions } from "./payments.js";
+import type { PaymentGate, PaymentResponseInstructions, VerifiedPayment } from "./payments.js";
 import type { ProxyLedger } from "./proxyLedger.js";
 import type { Repo } from "./repo.js";
 import * as schemas from "./schemas.js";
@@ -37,6 +37,21 @@ export interface ProxyDeps {
 function send(res: Response, r: PaymentResponseInstructions): void {
   for (const [k, v] of Object.entries(r.headers)) res.setHeader(k, v);
   res.status(r.status).json(r.body);
+}
+
+/**
+ * Release a verified payment that will not be settled.
+ *
+ * A failing cancel must never change what the agent is told. The refusal has already been decided
+ * by then — by the contract, or by the seller's upstream — and letting the rejection propagate
+ * would replace a 403 or a 502 with a 500 and skip the `calls` row that has not been written yet.
+ * Nothing was charged either way: `cancel` is the absence of a settlement, not an operation that
+ * has to succeed for the agent's money to stay put. So it is logged and dropped.
+ */
+async function release(payment: VerifiedPayment, responseStatus: number, log: (line: string) => void): Promise<void> {
+  await payment
+    .cancel(responseStatus)
+    .catch((err) => log(`payment cancel(${responseStatus}) failed, refusal stands: ${String(err)}`));
 }
 
 export function createProxyHandler(deps: ProxyDeps): RequestHandler {
@@ -63,12 +78,12 @@ export function createProxyHandler(deps: ProxyDeps): RequestHandler {
     try {
       recorded = await deps.proxyLedger.recordCall(agent, endpoint.id, budget, endpoint.price_stroops);
     } catch (err) {
-      await payment.cancel(500).catch(() => {});
+      await release(payment, 500, log);
       throw err;
     }
 
     if (recorded.kind === "missing_budget") {
-      await payment.cancel(400);
+      await release(payment, 400, log);
       const body: MissingBudgetHeaderResponse = {
         error: "missing_budget_header",
         message: `First call from ${agent} to this endpoint: send ${AGENT_BUDGET_HEADER}: <stroops> to set your spending limit. Nothing was charged.`,
@@ -77,7 +92,7 @@ export function createProxyHandler(deps: ProxyDeps): RequestHandler {
       return;
     }
     if (recorded.kind === "budget_exceeded") {
-      await payment.cancel(403);
+      await release(payment, 403, log);
       const body: BudgetExceededResponse = {
         error: "budget_exceeded",
         message: `This call would take ${agent} past the budget frozen on its first call to this endpoint. Nothing was charged.`,
@@ -88,7 +103,7 @@ export function createProxyHandler(deps: ProxyDeps): RequestHandler {
       return;
     }
     if (recorded.kind === "endpoint_not_found") {
-      await payment.cancel(404);
+      await release(payment, 404, log);
       log(`proxy ${proxy_slug}: endpoint ${endpoint.id} is cached but unknown to the contract (stale CONTRACT_ID?)`);
       throw new HttpError(404, "endpoint_not_found", `Endpoint ${endpoint.id} is not registered on the contract`);
     }
@@ -118,7 +133,7 @@ export function createProxyHandler(deps: ProxyDeps): RequestHandler {
       // endpoint failing. What stays unfair is the on-chain budget: record_call already ran and the
       // contract has no inverse, so this attempt still counts against the agent's limit (§1.3,
       // "Known limitation").
-      await payment.cancel(502);
+      await release(payment, 502, log);
       deps.repo.insertCall({
         endpoint_id: endpoint.id,
         agent_address: agent,

@@ -280,6 +280,31 @@ describe("upstream failure: nobody is charged, logged honestly, seller not credi
 });
 
 describe("rarer failures", () => {
+  // A cancel is the absence of a settlement, so a facilitator that refuses it changes nothing about
+  // the agent's money — but letting it throw would replace the refusal with a 500 and skip the row
+  // that has not been written yet. The decided answer has to survive it.
+  it("a failing payment cancel does not turn the 502 into a 500, and the call is still logged", async () => {
+    x402.setCancelFails(true);
+    upstream.respond = async () => new Response("boom", { status: 500 });
+
+    const res = await call({ budget: "5000000" });
+
+    expect(res.status).toBe(502);
+    expect(res.body).toEqual({ error: "upstream_failed", message: expect.stringMatching(/HTTP 500/) });
+    expect(x402.settled).toEqual([]);
+    expect(callRows()).toEqual([expect.objectContaining({ status: "upstream_failed", tx_hash: null })]);
+  });
+
+  it("a failing payment cancel does not turn the 403 into a 500", async () => {
+    await call({ budget: String(PRICE) }); // freeze the budget at exactly one call's worth
+    x402.setCancelFails(true);
+
+    const res = await call();
+
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({ error: "budget_exceeded" });
+  });
+
   it("payment settlement failing after a successful upstream → the library's response, not logged as paid", async () => {
     x402.setSettleFails(true);
     const res = await call({ budget: "5000000" });
